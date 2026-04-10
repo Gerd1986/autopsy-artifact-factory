@@ -25,6 +25,12 @@ import re
 import datetime
 import os
 import json
+import csv
+import shutil
+import tempfile
+import subprocess
+import shlex
+import uuid
 
 # ============================================================
 # LOKALER NORMALIZER (für Wizard-Parser, Python3 + pandas)
@@ -109,6 +115,109 @@ def normalize_duration(val):
         pass
     return None
 
+
+
+# ============================================================
+# HELFER
+# ============================================================
+
+def unique_temp_name(original_name, prefix="tmp_"):
+    stem, ext = os.path.splitext(original_name)
+    return prefix + stem + "_" + uuid.uuid4().hex[:12] + ext
+
+def sqlite_sidecar_paths(db_path):
+    return [db_path + "-wal", db_path + "-shm"]
+
+def copy_sqlite_with_sidecars(db_path, target_dir):
+    os.makedirs(target_dir, exist_ok=True)
+    dst_db = os.path.join(target_dir, unique_temp_name(os.path.basename(db_path), "sqlite_"))
+    shutil.copy2(db_path, dst_db)
+    for sidecar in sqlite_sidecar_paths(db_path):
+        if os.path.exists(sidecar):
+            shutil.copy2(sidecar, dst_db + sidecar[len(db_path):])
+    return dst_db
+
+def preprocess_steps_from_meta(meta):
+    steps = []
+    raw_steps = meta.get("preprocess_steps")
+    if isinstance(raw_steps, list) and raw_steps:
+        for idx, step in enumerate(raw_steps):
+            if not isinstance(step, dict):
+                continue
+            cmd = str(step.get("command") or "").strip()
+            if not cmd:
+                continue
+            steps.append({
+                "name": str(step.get("name") or ("step_%d" % (idx + 1))).strip() or ("step_%d" % (idx + 1)),
+                "command": cmd,
+                "output_suffix": str(step.get("output_suffix") or "").strip() or ".txt",
+                "shell": bool(step.get("shell", False)),
+            })
+    elif meta.get("preprocess_enabled"):
+        cmd = str(meta.get("preprocess_command") or "").strip()
+        if cmd:
+            steps.append({
+                "name": "step_1",
+                "command": cmd,
+                "output_suffix": str(meta.get("preprocess_output_suffix") or "").strip() or ".txt",
+                "shell": False,
+            })
+    return steps
+
+def build_preprocess_output_path(current_input, preferred_suffix=None, step_index=None):
+    stem, ext = os.path.splitext(os.path.basename(current_input))
+    suffix = preferred_suffix if preferred_suffix is not None else ext
+    if not suffix:
+        suffix = ".out"
+    tmp_dir = tempfile.mkdtemp(prefix="wizard_pre_")
+    tag = "" if step_index is None else "_step%d" % (step_index + 1)
+    return os.path.join(tmp_dir, stem + tag + "_preprocessed" + suffix)
+
+def run_single_preprocess_step(command_template, input_path, output_path, shell=False, script_dir=None, preview_mode=False):
+    cmd_template = command_template
+    if preview_mode and not script_dir:
+        script_dir = os.path.dirname(os.path.abspath(input_path))
+    if script_dir:
+        cmd_template = cmd_template.replace("{script_dir}", str(script_dir).replace("\\", "/"))
+    command = cmd_template.format(input=input_path, output=output_path)
+    if shell:
+        pipe = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        pipe = subprocess.Popen(shlex.split(command), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout_data, stderr_data = pipe.communicate()
+    if pipe.returncode != 0:
+        if stderr_data is None:
+            stderr_text = ""
+        else:
+            try:
+                stderr_text = stderr_data.decode("utf-8", "replace")
+            except Exception:
+                stderr_text = str(stderr_data)
+        raise RuntimeError("Preprocessing fehlgeschlagen: " + stderr_text)
+    if not os.path.exists(output_path):
+        with open(output_path, "wb") as f:
+            if stdout_data:
+                f.write(stdout_data)
+    return pipe, command
+
+def run_preprocessing_if_needed(meta, preview_mode=False):
+    new_meta = dict(meta)
+    steps = preprocess_steps_from_meta(meta)
+    if not steps:
+        return new_meta
+    current_input = meta["path"]
+    script_dir = meta.get("script_dir")
+    logs = []
+    for idx, step in enumerate(steps):
+        output_path = build_preprocess_output_path(current_input, step.get("output_suffix") or ".txt", idx)
+        pipe, command = run_single_preprocess_step(step["command"], current_input, output_path, step.get("shell", False), script_dir, preview_mode)
+        logs.append({"index": idx + 1, "name": step.get("name"), "command": command, "input": current_input, "output": output_path, "returncode": pipe.returncode})
+        current_input = output_path
+    new_meta["preprocess_original_path"] = meta["path"]
+    new_meta["path"] = current_input
+    new_meta["preprocess_logs"] = logs
+    return new_meta
+
 # ============================================================
 # LOADER (Wizard – mit pandas)
 # ============================================================
@@ -118,18 +227,22 @@ def load_csv_preview(path, sep):
         sep = "\t"
     return pd.read_csv(path, sep=sep, nrows=50, encoding="utf-8-sig")
 
-def load_sqlite_preview(path, query=None):
-    con = sqlite3.connect(path)
-    if query:
-        df = pd.read_sql_query(query, con)
-    else:
-        tabs = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", con)
-        if tabs.empty:
-            con.close()
-            raise ValueError("Keine Tabellen in SQLite gefunden.")
-        df = pd.read_sql_query(f"SELECT * FROM {tabs.iloc[0,0]} LIMIT 50", con)
-    con.close()
-    return df
+def load_sqlite_preview(meta):
+    temp_dir = tempfile.mkdtemp(prefix="wizard_sqlite_preview_")
+    db_copy = copy_sqlite_with_sidecars(meta["path"], temp_dir)
+    con = sqlite3.connect(db_copy)
+    try:
+        if meta.get("query"):
+            df = pd.read_sql_query(meta["query"], con)
+        else:
+            tabs = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", con)
+            if tabs.empty:
+                raise ValueError("Keine Tabellen in SQLite gefunden.")
+            table = meta.get("table") or tabs.iloc[0, 0]
+            df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 50", con)
+        return df
+    finally:
+        con.close()
 
 def load_regex_preview(path, pattern):
     pat = re.compile(pattern)
@@ -146,6 +259,7 @@ def load_regex_preview(path, pattern):
 # ============================================================
 
 def parse_full_local(meta, mapping, plugin_type):
+    meta = run_preprocessing_if_needed(meta, preview_mode=True)
     st = meta["source_type"]
 
     if st == "csv":
@@ -155,12 +269,16 @@ def parse_full_local(meta, mapping, plugin_type):
         df = pd.read_csv(meta["path"], sep=sep, encoding="utf-8-sig")
 
     elif st == "sqlite":
-        con = sqlite3.connect(meta["path"])
-        if meta.get("query"):
-            df = pd.read_sql_query(meta["query"], con)
-        else:
-            df = pd.read_sql_query(f"SELECT * FROM {meta['table']}", con)
-        con.close()
+        temp_dir = tempfile.mkdtemp(prefix="wizard_sqlite_parse_")
+        db_copy = copy_sqlite_with_sidecars(meta["path"], temp_dir)
+        con = sqlite3.connect(db_copy)
+        try:
+            if meta.get("query"):
+                df = pd.read_sql_query(meta["query"], con)
+            else:
+                df = pd.read_sql_query(f"SELECT * FROM {meta['table']}", con)
+        finally:
+            con.close()
 
     elif st == "regex":
         df = load_regex_preview(meta["path"], meta["regex"])
@@ -180,7 +298,7 @@ def parse_full_local(meta, mapping, plugin_type):
                 rec["longitude"] = normalize_float(row[mapping["Longitude"]], -180, 180)
             if mapping["Latitude"]:    
                 rec["latitude"]  = normalize_float(row[mapping["Latitude"]],  -90,  90)
-            if mapping["Speed"]:    
+            if mapping["Geschwindigkeit"]:    
                 rec["speed"]  = normalize_float(row[mapping["Geschwindigkeit"]],  -90,  90)
 
         elif plugin_type == "Last-Position":
@@ -246,41 +364,36 @@ EMBEDDED_PARSER_BLOCK = r'''
 # Embedded Parser (no pandas)
 # Supports: CSV, Regex/Text
 # Geo: emits timestamp_epoch (int UTC) + timestamp_str
+# Extras: preprocessing, sqlite sidecars, duplicate-safe temp names
 # ===============================
 
 import csv
 import re
 import datetime
 import os
+import shutil
+import tempfile
+import subprocess
+import shlex
+import uuid
 
 def _timestamp_to_epoch_and_str(val):
-    """
-    Returns (epoch_seconds:int|None, timestamp_str:str|None)
-    Tries:
-    - epoch seconds / epoch ms
-    - common datetime formats
-    If parsing fails, returns (None, original_string)
-    """
     if val is None:
         return (None, None)
-
     s = str(val).strip()
     if not s:
         return (None, None)
-
-    # epoch seconds/ms
     if re.match(r"^\d+$", s):
         try:
             num = int(s)
-            if num > 1000000000000:  # ms
+            if num > 1000000000000:
                 num //= 1000
             dt = datetime.datetime.utcfromtimestamp(num)
             return (int(num), dt.strftime("%Y-%m-%d %H:%M:%S"))
         except Exception:
             return (None, s)
-
     fmts = [
-        "%Y-%m-%d %H:%M:%S",        
+        "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d, %H:%M:%S",
         "%Y/%m/%d, %H:%M:%S.%f",
@@ -292,12 +405,10 @@ def _timestamp_to_epoch_and_str(val):
     for fmt in fmts:
         try:
             dt = datetime.datetime.strptime(s, fmt)
-            # interpret as UTC; adjust here if your timestamps are local time
             epoch = int((dt - datetime.datetime(1970, 1, 1)).total_seconds())
             return (epoch, dt.strftime("%Y-%m-%d %H:%M:%S"))
         except Exception:
             continue
-
     return (None, s)
 
 def _normalize_float(val, mn=None, mx=None):
@@ -352,10 +463,94 @@ def _normalize_duration(val):
         pass
     return None
 
+def _unique_temp_name(original_name, prefix="tmp_"):
+    stem, ext = os.path.splitext(original_name)
+    return prefix + stem + "_" + uuid.uuid4().hex[:12] + ext
+
+def _copy_sqlite_with_sidecars(db_path, dst_dir):
+    if not os.path.isdir(dst_dir):
+        os.makedirs(dst_dir)
+    dst_db = os.path.join(dst_dir, _unique_temp_name(os.path.basename(db_path), "sqlite_"))
+    shutil.copy2(db_path, dst_db)
+    for suffix in ["-wal", "-shm"]:
+        src = db_path + suffix
+        if os.path.exists(src):
+            shutil.copy2(src, dst_db + suffix)
+    return dst_db
+
+def _preprocess_steps_from_meta(meta):
+    steps = []
+    raw_steps = meta.get("preprocess_steps")
+    if raw_steps:
+        for idx, step in enumerate(raw_steps):
+            if not isinstance(step, dict):
+                continue
+            cmd = str(step.get("command") or "").strip()
+            if not cmd:
+                continue
+            steps.append({
+                "name": str(step.get("name") or ("step_%d" % (idx + 1))).strip(),
+                "command": cmd,
+                "output_suffix": str(step.get("output_suffix") or "").strip() or ".txt",
+                "shell": bool(step.get("shell", False)),
+            })
+    elif meta.get("preprocess_enabled"):
+        cmd = str(meta.get("preprocess_command") or "").strip()
+        if cmd:
+            steps.append({
+                "name": "step_1",
+                "command": cmd,
+                "output_suffix": str(meta.get("preprocess_output_suffix") or "").strip() or ".txt",
+                "shell": False,
+            })
+    return steps
+
+def _run_preprocess_step(step, input_path, step_index, script_dir):
+    out_suffix = step.get("output_suffix") or os.path.splitext(input_path)[1] or ".txt"
+    tmp_dir = tempfile.mkdtemp(prefix="autopsy_pre_")
+    out_path = os.path.join(tmp_dir, "preprocessed_step_%d" % (step_index + 1) + out_suffix)
+    cmd_template = step["command"]
+    if script_dir:
+        cmd_template = cmd_template.replace("{script_dir}", str(script_dir).replace("\\", "/"))
+    cmd = cmd_template.format(input=input_path, output=out_path)
+    if step.get("shell", False):
+        pipe = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        pipe = subprocess.Popen(shlex.split(cmd), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout_data, stderr_data = pipe.communicate()
+    if pipe.returncode != 0:
+        if stderr_data is None:
+            stderr_text = ""
+        else:
+            try:
+                stderr_text = stderr_data.decode("utf-8", "replace")
+            except Exception:
+                stderr_text = str(stderr_data)
+        raise Exception("Preprocessing fehlgeschlagen: " + stderr_text)
+    if not os.path.exists(out_path):
+        f = open(out_path, "wb")
+        try:
+            if stdout_data:
+                f.write(stdout_data)
+        finally:
+            f.close()
+    return out_path
+
+def _run_preprocess_if_needed(meta):
+    steps = _preprocess_steps_from_meta(meta)
+    if not steps:
+        return dict(meta)
+    new_meta = dict(meta)
+    current_path = meta["path"]
+    script_dir = meta.get("script_dir")
+    for idx, step in enumerate(steps):
+        current_path = _run_preprocess_step(step, current_path, idx, script_dir)
+    new_meta["path"] = current_path
+    return new_meta
+
 def _iter_rows_from_csv_file(path, sep):
     if sep == "\\t":
         sep = "\t"
-    # Encoding handling in Jython can vary; adjust if needed.
     with open(path, "r") as f:
         reader = csv.DictReader(f, delimiter=sep)
         for row in reader:
@@ -370,124 +565,214 @@ def _iter_rows_from_regex_file(path, pattern):
                 yield m.groupdict()
 
 def parse_rows(meta, mapping, plugin_type):
-    """
-    Returns: list of dict rows, normalized per plugin_type
-    meta: {source_type: csv|regex|sqlite, path, sep, regex, query, table}
-    mapping: logical_field -> column_name (or regex group key)
-    """
     st = meta.get("source_type")
-
+    meta = _run_preprocess_if_needed(meta)
     if st == "csv":
         src_iter = _iter_rows_from_csv_file(meta["path"], meta.get("sep", ","))
     elif st == "regex":
         src_iter = _iter_rows_from_regex_file(meta["path"], meta["regex"])
     elif st == "sqlite":
-        src_iter = parse_rows_sqlite_jdbc(meta["path"], meta["query"])
+        sql = meta.get("query") or ("SELECT * FROM " + meta.get("table"))
+        src_iter = parse_rows_sqlite_jdbc(meta["path"], sql)
     else:
         raise Exception("Unknown source_type: %s" % str(st))
-
     out = []
-
     for row in src_iter:
         rec = {}
-
         if plugin_type == "Geo-Track":
-            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping["Timestamp"]))
+            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
             rec["timestamp_epoch"] = epoch
-            rec["timestamp_str"]   = ts_str
-            rec["longitude"] = _normalize_float(row.get(mapping["Longitude"]), -180, 180)
-            rec["latitude"]  = _normalize_float(row.get(mapping["Latitude"]),  -90,  90)
-            rec["speed"]  = _normalize_float(row.get(mapping["Geschwindigkeit"]),  -90,  90)
-
+            rec["timestamp_str"] = ts_str
+            rec["longitude"] = _normalize_float(row.get(mapping.get("Longitude")), -180, 180)
+            rec["latitude"] = _normalize_float(row.get(mapping.get("Latitude")), -90, 90)
+            rec["speed"] = _normalize_float(row.get(mapping.get("Geschwindigkeit")))
         elif plugin_type == "Last-Position":
-            rec["remark"]   = row.get(mapping["Kommentar"])
-            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping["Timestamp"]))
+            rec["remark"] = row.get(mapping.get("Kommentar"))
+            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
             rec["timestamp_epoch"] = epoch
-            rec["timestamp_str"]   = ts_str          
-            rec["longitude"] = _normalize_float(row.get(mapping["Longitude"]), -180, 180)
-            rec["latitude"]  = _normalize_float(row.get(mapping["Latitude"]),  -90,  90)
-
+            rec["timestamp_str"] = ts_str
+            rec["longitude"] = _normalize_float(row.get(mapping.get("Longitude")), -180, 180)
+            rec["latitude"] = _normalize_float(row.get(mapping.get("Latitude")), -90, 90)
         elif plugin_type == "Geo-Bookmark":
-            rec["remark"]   = row.get(mapping["Kommentar"])
-            rec["longitude"] = _normalize_float(row.get(mapping["Longitude"]), -180, 180)
-            rec["latitude"]  = _normalize_float(row.get(mapping["Latitude"]),  -90,  90)
-
+            rec["remark"] = row.get(mapping.get("Kommentar"))
+            rec["longitude"] = _normalize_float(row.get(mapping.get("Longitude")), -180, 180)
+            rec["latitude"] = _normalize_float(row.get(mapping.get("Latitude")), -90, 90)
         elif plugin_type == "Mobile":
-            rec["lastname"]  = row.get(mapping["Nachname"])
-            rec["firstname"] = row.get(mapping["Vorname"])
-            rec["phone"]     = _normalize_phone(row.get(mapping["Telefonnummer"]))
-            rec["bt_mac"]    = _normalize_mac(row.get(mapping["BluetoothAdresse"]))
-            
+            rec["lastname"] = row.get(mapping.get("Nachname"))
+            rec["firstname"] = row.get(mapping.get("Vorname"))
+            rec["phone"] = _normalize_phone(row.get(mapping.get("Telefonnummer")))
+            rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Bluetooth":
-            rec["devicename"]  = row.get(mapping["Geraetename"])
-            rec["bt_mac"]    = _normalize_mac(row.get(mapping["BluetoothAdresse"]))   
-
+            rec["devicename"] = row.get(mapping.get("Geraetename"))
+            rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Call":
-            rec["caller"]           = row.get(mapping["Anrufername"])
-            rec["caller_mac"]       = _normalize_mac(row.get(mapping["MACAdresse"]))
-            rec["callee"]           = row.get(mapping["Angerufener"])
-            rec["callee_number"]    = _normalize_phone(row.get(mapping["Nummer"]))
-            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping["Timestamp"]))
+            rec["caller"] = row.get(mapping.get("Anrufername"))
+            rec["caller_mac"] = _normalize_mac(row.get(mapping.get("MACAdresse")))
+            rec["callee"] = row.get(mapping.get("Angerufener"))
+            rec["callee_number"] = _normalize_phone(row.get(mapping.get("Nummer")))
+            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
             rec["timestamp_epoch"] = epoch
-            rec["timestamp_str"]   = ts_str
-            rec["duration_seconds"] = _normalize_duration(row.get(mapping["Dauer"]))
-
+            rec["timestamp_str"] = ts_str
+            rec["duration_seconds"] = _normalize_duration(row.get(mapping.get("Dauer")))
         out.append(rec)
-
     return out
 '''
 
 SQLITE_JDBC_BLOCK = r'''
-# ===============================
-# SQLite via JDBC (PSEUDOCODE)
-# ===============================
-# In Jython usually no 'sqlite3'. Use JDBC:
-#
 from java.sql import DriverManager
-#
+
 def parse_rows_sqlite_jdbc(db_path, sql_query):
     rows = []
-    # Ensure SQLite JDBC driver is available to Autopsy/JVM classpath.
-    conn = DriverManager.getConnection("jdbc:sqlite:" + db_path)
+    tmp_dir = tempfile.mkdtemp(prefix="autopsy_sqlite_")
+    db_copy = _copy_sqlite_with_sidecars(db_path, tmp_dir)
+    conn = DriverManager.getConnection("jdbc:sqlite:" + db_copy)
     stmt = conn.createStatement()
     rs = stmt.executeQuery(sql_query)
     meta = rs.getMetaData()
     col_count = meta.getColumnCount()
     while rs.next():
         rec = {}
-        for i in range(1, col_count+1):
+        for i in range(1, col_count + 1):
             name = meta.getColumnName(i)
             rec[name] = rs.getString(i)
         rows.append(rec)
-    rs.close(); stmt.close(); conn.close()
+    rs.close()
+    stmt.close()
+    conn.close()
     return rows
-    pass
 '''
 
 # ============================================================
 # TEMPLATE GENERATOR (Autopsy – kommentiert, Parser eingebettet)
 # ============================================================
 
+
+def build_artifact_block(plugin_type):
+    if plugin_type == "Geo-Track":
+        return r'''
+                    timestamp_epoch = row.get("timestamp_epoch")
+                    latitude = row.get("latitude")
+                    longitude = row.get("longitude")
+                    speed = row.get("speed")
+                    attrs = ArrayList()
+                    if timestamp_epoch is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
+                    if latitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
+                    if longitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
+                    if speed is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_VELOCITY, moduleName, float(speed)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_TRACKPOINT), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    elif plugin_type == "Last-Position":
+        return r'''
+                    remark = row.get("remark")
+                    timestamp_epoch = row.get("timestamp_epoch")
+                    latitude = row.get("latitude")
+                    longitude = row.get("longitude")
+                    attrs = ArrayList()
+                    if remark is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                    if timestamp_epoch is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
+                    if latitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
+                    if longitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_LAST_KNOWN_LOCATION), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    elif plugin_type == "Geo-Bookmark":
+        return r'''
+                    remark = row.get("remark")
+                    latitude = row.get("latitude")
+                    longitude = row.get("longitude")
+                    attrs = ArrayList()
+                    if remark is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                    if latitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
+                    if longitude is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_BOOKMARK), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    elif plugin_type == "Mobile":
+        return r'''
+                    firstname = row.get("firstname")
+                    lastname = row.get("lastname")
+                    phone = row.get("phone")
+                    bt_mac = row.get("bt_mac")
+                    attrs = ArrayList()
+                    if lastname is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME, moduleName, str(lastname)))
+                    if firstname is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(firstname)))
+                    if phone is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, str(phone)))
+                    if bt_mac is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(bt_mac)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CONTACT), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    elif plugin_type == "Bluetooth":
+        return r'''
+                    devicename = row.get("devicename")
+                    bt_mac = row.get("bt_mac")
+                    attrs = ArrayList()
+                    if devicename is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DEVICE_NAME, moduleName, str(devicename)))
+                    if bt_mac is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(bt_mac)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_BLUETOOTH_PAIRING), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    else:
+        return r'''
+                    caller = row.get("caller")
+                    caller_mac = row.get("caller_mac")
+                    callee = row.get("callee")
+                    callee_number = row.get("callee_number")
+                    timestamp_epoch = row.get("timestamp_epoch")
+                    duration_seconds = row.get("duration_seconds")
+                    attrs = ArrayList()
+                    if timestamp_epoch is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
+                    if caller is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(caller)))
+                    if caller_mac is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(caller_mac)))
+                    if callee is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(callee)))
+                    if callee_number is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, str(callee_number)))
+                    if duration_seconds is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, "Duration (s): %s" % str(duration_seconds)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CALLLOG), attrs)
+                    blackboard.indexArtifact(art)
+'''
+
 def build_autopsy_template(plugin_type, filename, meta, mapping, embed_parser=True):
-    mj = json.dumps(mapping, indent=2, ensure_ascii=False)
-    meta_json = json.dumps(meta, indent=2, ensure_ascii=False)
+    meta_literal = repr(meta)
+    mapping_literal = repr(mapping)
 
     header = f'''# coding=utf-8
 
-FILENAME = "{filename}"
-META = {meta_json}
-MAPPING = {mj}
+FILENAME = {filename!r}
+META = {meta_literal}
+MAPPING = {mapping_literal}
 
-# --- AUTOPSY IMPORTS (COMMENTED) ---
 from org.sleuthkit.autopsy.ingest import IngestModuleFactoryAdapter, DataSourceIngestModule, IngestModule
 from org.sleuthkit.autopsy.casemodule import Case
 from org.sleuthkit.datamodel import Blackboard, BlackboardAttribute, BlackboardArtifact
 from org.sleuthkit.autopsy.datamodel import ContentUtils
-#
 from org.sleuthkit.autopsy.ingest import IngestServices
 from org.sleuthkit.autopsy.ingest import IngestMessage
 from java.util import ArrayList
-from java.io import File, FileOutputStream
+from java.io import File
+import os
 '''
 
     parts = [header]
@@ -495,203 +780,70 @@ from java.io import File, FileOutputStream
         parts.append(EMBEDDED_PARSER_BLOCK)
         parts.append(SQLITE_JDBC_BLOCK)
 
-    if plugin_type == "Geo-Track":
-        artifact_block = r'''
-#                     # ---- GEO / TSK_GPS_TRACKPOINT ----
-                    timestamp_epoch = row.get("timestamp_epoch")   #int UTC, recommended for TSK_DATETIME
-                    timestamp_str   = row.get("timestamp_str")     #optional string for debugging
-                    latitude        = row.get("latitude")
-                    longitude       = row.get("longitude")
-                    speed           = row.get("speed")
-#
-                    attrs = ArrayList()
-                    if timestamp_epoch is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
-                    if latitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
-                    if longitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
-#
-                    if speed is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_VELOCITY, moduleName, float(speed)))
-                    #Optional debug/comment:
-                    #if timestamp_str:
-                    #    attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, "TS: " + str(timestamp_str)))
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_TRACKPOINT), attrs)
-                    blackboard.indexArtifact(art)
-'''
-    elif plugin_type == "Last-Position":
-        artifact_block = r'''
-#                     # ---- GEO / TSK_GPS_LAST_KNOWN_LOCATION ----
-                    remark          = row.get("remark") 
-                    timestamp_epoch = row.get("timestamp_epoch")   #int UTC, recommended for TSK_DATETIME
-                    timestamp_str   = row.get("timestamp_str")     #optional string for debugging
-                    latitude        = row.get("latitude")
-                    longitude       = row.get("longitude")
-#
-                    attrs = ArrayList()
-                    if remark is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, remark))                   
-                    if timestamp_epoch is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
-                    if latitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
-                    if longitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
-#
-                    #Optional debug/comment:
-                    #if timestamp_str:
-                    #    attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, "TS: " + str(timestamp_str)))
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_LAST_KNOWN_LOCATION), attrs)
-                    blackboard.indexArtifact(art)
-'''
-    elif plugin_type == "Geo-Bookmark":
-        artifact_block = r'''
-#                     # ---- GEO / TSK_GPS_Bookmark ----
-                    remark          = row.get("remark")     
-                    latitude        = row.get("latitude")
-                    longitude       = row.get("longitude")
-#
-                    attrs = ArrayList()
-                    if remark is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, remark))
-                    if latitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
-                    if longitude is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
-#
-                    
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_TRACKPOINT), attrs)
-                    blackboard.indexArtifact(art)
-'''
-    elif plugin_type == "Mobile":
-        artifact_block = r'''
-#                     ## ---- MOBILE / TSK_CONTACT ----
-                    firstname = row.get("firstname") or ""
-                    lastname  = row.get("lastname") or ""
-                    phone     = row.get("phone")
-                    bt_mac    = row.get("bt_mac")
-#
-                    full_name = (firstname + " " + lastname).strip()
-#
-                    attrs = ArrayList()
-                    if full_name:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, full_name))
-                    if phone:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, phone))
-                    if bt_mac:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, bt_mac))
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CONTACT), attrs)
-                    blackboard.indexArtifact(art)
-'''
-
-    elif plugin_type == "Bluetooth":
-        artifact_block = r'''
-#                     ## ---- Bluetooth / TSK_BLUETOOTH_PAIRING ----
-                    devicename = row.get("devicename") or ""
-                    bt_mac    = row.get("bt_mac")
-#
-                    
-#
-                    attrs = ArrayList()
-                    if devicename:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DEVICE_NAME, moduleName, devicename))
-                    if bt_mac:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, bt_mac))
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_BLUETOOTH_PAIRING), attrs)
-                    blackboard.indexArtifact(art)
-'''
-    else:
-        artifact_block = r'''
-#                     ## ---- CALL / TSK_CALLLOG ----
-                    caller           = row.get("caller") or ""
-                    caller_mac       = row.get("caller_mac")
-                    callee           = row.get("callee") or ""
-                    callee_number    = row.get("callee_number")
-                    duration_seconds = row.get("duration_seconds")
-                    timestamp_epoch = row.get("timestamp_epoch")   #int UTC, recommended for TSK_DATETIME
-                    timestamp_str   = row.get("timestamp_str")     #optional string for debugging
-#
-                    attrs = ArrayList()
-                    if timestamp_epoch is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
-                    if caller:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, caller))
-                    if caller_mac:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, caller_mac))
-                    if callee:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, callee))
-                    if callee_number:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, callee_number))
-                    if duration_seconds is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, "Duration (s): %s" % str(duration_seconds)))
-#
-                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CALLLOG), attrs)
-                    blackboard.indexArtifact(art)
-'''
+    artifact_block = build_artifact_block(plugin_type)
 
     core = f'''
 class UniversalPluginFactory(IngestModuleFactoryAdapter):
     def getModuleDisplayName(self):
         return "{plugin_type} Universal Plugin"
     def getModuleDescription(self):
-        return "neuer Codeversuch"
+        return "Generated by stable wizard + preprocessing"
     def getModuleVersionNumber(self):
-        return "1.0"
+        return "2.0"
     def isDataSourceIngestModuleFactory(self):
-        return True 
+        return True
     def createDataSourceIngestModule(self, options):
         return UniversalPluginModule()
-#
-#
+
 class UniversalPluginModule(DataSourceIngestModule):
     def startUp(self, context):
         self.context = context
         self.moduleName = "{plugin_type} Universal Plugin"
-#
+
     def process(self, dataSource, progressBar):
         case = Case.getCurrentCase()
         fm = case.getServices().getFileManager()
         blackboard = case.getServices().getBlackboard()
-#
-        #1) Datei im Case anhand Dateiname finden
+
         files = fm.findFiles(dataSource, FILENAME)
         if files is None or files.isEmpty():
             return IngestModule.ProcessResult.OK
-#
-        #2) Jede gefundene Datei verarbeiten
+
         for file in files:
             try:
-                #2a) In Modul-Verzeichnis als Tempfile schreiben
-                moduleDir = case.getModuleDirectory()
                 tempDir = os.path.join(Case.getCurrentCase().getTempDirectory(), "{plugin_type}_Universal")
                 try:
                     os.mkdir(tempDir)
                 except:
                     pass
-                outFile = os.path.join(tempDir, file.getName())
+
+                outFile = os.path.join(tempDir, _unique_temp_name(file.getName(), "evidence_"))
                 ContentUtils.writeToFile(file, File(outFile))
-                #2b) Meta-Pfad auf Tempfile umbiegen
+
                 meta = dict(META)
                 meta["path"] = outFile
-        #
-                #2c) Parsen (ohne externe Imports; parse_rows ist oben embedded)
+                meta["script_dir"] = os.path.dirname(__file__).replace("\\\\", "/")
+
+                if meta.get("source_type") == "sqlite":
+                    for suffix in ["-wal", "-shm"]:
+                        try:
+                            related = fm.findFiles(dataSource, file.getName() + suffix)
+                            if related is not None and not related.isEmpty():
+                                ContentUtils.writeToFile(related.get(0), File(outFile + suffix))
+                        except:
+                            pass
+
                 rows = parse_rows(meta, MAPPING, "{plugin_type}")
-        #
                 moduleName = self.moduleName
+
                 for row in rows:
 {artifact_block}
-        #
             except Exception as e:
-                #Optional: Ingest Message
-                IngestServices.getInstance().postMessage(IngestMessage.createErrorMessage(self.moduleName, "Error processing " + file.getName(), str(e)))
+                IngestServices.getInstance().postMessage(
+                    IngestMessage.createErrorMessage(self.moduleName, "Error processing " + file.getName(), str(e))
+                )
                 pass
-#
+
         return IngestModule.ProcessResult.OK
 '''
     parts.append(core)
@@ -704,8 +856,8 @@ class UniversalPluginModule(DataSourceIngestModule):
 class Wizard(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Autopsy Universal Wizard (CSV + SQLite + Regex)")
-        self.geometry("1150x860")
+        self.title("Autopsy Universal Wizard (stable + preprocessing + WAL/SHM + duplicate-safe)")
+        self.geometry("1210x900")
 
         self.meta = {}
         self.preview = None
@@ -714,6 +866,10 @@ class Wizard(tk.Tk):
         self.plugin_type = tk.StringVar(value="Geo-Track")
         self.csv_sep = tk.StringVar(value=",")
         self.embed_parser = tk.BooleanVar(value=True)
+        self.preprocess_enabled = tk.BooleanVar(value=False)
+        self.preprocess_command = tk.StringVar(value='perl "{script_dir}/getNMEA.pl" "{input}"')
+        self.preprocess_output_suffix = tk.StringVar(value=".txt")
+        self.preprocess_steps = []
 
         self._build_ui()
 
@@ -747,6 +903,23 @@ class Wizard(tk.Tk):
 
         ttk.Button(top, text="Vorschau laden", command=self.load_preview).pack(side="left", padx=6)
 
+
+        opts = tk.LabelFrame(self, text="Preprocessing")
+        opts.pack(fill="x", padx=10, pady=6)
+
+        row1 = tk.Frame(opts)
+        row1.pack(fill="x", padx=8, pady=5)
+        ttk.Checkbutton(row1, text="Preprocessing aktiv", variable=self.preprocess_enabled).pack(side="left")
+        ttk.Label(row1, text="Legacy Step 1:").pack(side="left", padx=(12, 4))
+        ttk.Entry(row1, textvariable=self.preprocess_command, width=72).pack(side="left", fill="x", expand=True)
+        ttk.Label(row1, text="Suffix:").pack(side="left", padx=(10, 4))
+        ttk.Entry(row1, textvariable=self.preprocess_output_suffix, width=10).pack(side="left", padx=(0, 6))
+
+        row2 = tk.Frame(opts)
+        row2.pack(fill="x", padx=8, pady=5)
+        ttk.Button(row2, text="Preprocess-Pipeline bearbeiten", command=self.edit_preprocess_pipeline).pack(side="left")
+        ttk.Label(row2, text="Mehrere Steps mit {input}/{output}; script_dir wird im Plugin automatisch gesetzt.").pack(side="left", padx=12)
+
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
         self.preview_box = scrolledtext.ScrolledText(self, height=18)
         self.preview_box.pack(fill="both", padx=10, pady=6)
@@ -765,6 +938,124 @@ class Wizard(tk.Tk):
     # Source selection
     # ---------------------------
 
+
+    def _apply_common_meta_options(self):
+        if not self.meta:
+            return
+        self.meta["preprocess_enabled"] = bool(self.preprocess_enabled.get())
+        self.meta["preprocess_command"] = self.preprocess_command.get().strip()
+        self.meta["preprocess_output_suffix"] = self.preprocess_output_suffix.get().strip() or ".txt"
+        self.meta["preprocess_steps"] = list(self.preprocess_steps)
+        if self.meta.get("source_type") == "csv":
+            self.meta["sep"] = self.csv_sep.get()
+
+    def edit_preprocess_pipeline(self):
+        win = tk.Toplevel(self)
+        win.title("Preprocess-Pipeline")
+        win.geometry("1100x520")
+
+        ttk.Label(win, text="Jeder Step nutzt {input} und {output}. Reihenfolge = Ausführungsreihenfolge.").pack(anchor="w", padx=10, pady=6)
+        listbox = tk.Listbox(win, height=10)
+        listbox.pack(fill="x", padx=10, pady=6)
+
+        def refresh():
+            listbox.delete(0, "end")
+            for idx, step in enumerate(self.preprocess_steps):
+                shell_txt = "shell" if step.get("shell", False) else "noshell"
+                listbox.insert("end", "%d. %s [%s] -> %s :: %s" % (idx + 1, step.get("name", "step"), shell_txt, step.get("output_suffix", ""), step.get("command", "")))
+            self.preprocess_enabled.set(bool(self.preprocess_steps or self.preprocess_command.get().strip()))
+
+        def edit_step(existing=None):
+            dlg = tk.Toplevel(win)
+            dlg.title("Preprocess-Step")
+            dlg.geometry("950x340")
+
+            name_var = tk.StringVar(value=(existing or {}).get("name", "step_%d" % (len(self.preprocess_steps) + 1)))
+            suffix_var = tk.StringVar(value=(existing or {}).get("output_suffix", ".txt"))
+            shell_var = tk.BooleanVar(value=(existing or {}).get("shell", False))
+
+            ttk.Label(dlg, text="Name:").pack(anchor="w", padx=10, pady=(10, 2))
+            ttk.Entry(dlg, textvariable=name_var, width=40).pack(anchor="w", padx=10)
+
+            row = tk.Frame(dlg)
+            row.pack(fill="x", padx=10, pady=8)
+            ttk.Label(row, text="Output-Suffix:").pack(side="left")
+            ttk.Entry(row, textvariable=suffix_var, width=12).pack(side="left", padx=6)
+            ttk.Checkbutton(row, text="shell=True", variable=shell_var).pack(side="left", padx=16)
+
+            ttk.Label(dlg, text="Command:").pack(anchor="w", padx=10, pady=(8, 2))
+            cmd_box = scrolledtext.ScrolledText(dlg, height=10, wrap="word")
+            cmd_box.pack(fill="both", expand=True, padx=10, pady=4)
+            cmd_box.insert("1.0", (existing or {}).get("command", ""))
+
+            result = []
+            def ok():
+                result.append({
+                    "name": name_var.get().strip() or ("step_%d" % (len(self.preprocess_steps) + 1)),
+                    "command": cmd_box.get("1.0", "end-1c").strip(),
+                    "output_suffix": suffix_var.get().strip() or ".txt",
+                    "shell": bool(shell_var.get()),
+                })
+                dlg.destroy()
+
+            ttk.Button(dlg, text="OK", command=ok).pack(pady=8)
+            dlg.grab_set()
+            dlg.wait_window()
+            return result[0] if result else None
+
+        btns = tk.Frame(win)
+        btns.pack(fill="x", padx=10, pady=4)
+
+        def add_step():
+            step = edit_step()
+            if step and step.get("command"):
+                self.preprocess_steps.append(step)
+                refresh()
+
+        def edit_selected():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            step = edit_step(self.preprocess_steps[idx])
+            if step and step.get("command"):
+                self.preprocess_steps[idx] = step
+                refresh()
+                listbox.selection_set(idx)
+
+        def delete_selected():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            del self.preprocess_steps[sel[0]]
+            refresh()
+
+        def move_up():
+            sel = listbox.curselection()
+            if not sel or sel[0] == 0:
+                return
+            idx = sel[0]
+            self.preprocess_steps[idx - 1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx - 1]
+            refresh()
+            listbox.selection_set(idx - 1)
+
+        def move_down():
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(self.preprocess_steps) - 1:
+                return
+            idx = sel[0]
+            self.preprocess_steps[idx + 1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx + 1]
+            refresh()
+            listbox.selection_set(idx + 1)
+
+        ttk.Button(btns, text="Hinzufügen", command=add_step).pack(side="left", padx=4)
+        ttk.Button(btns, text="Bearbeiten", command=edit_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="Löschen", command=delete_selected).pack(side="left", padx=4)
+        ttk.Button(btns, text="Hoch", command=move_up).pack(side="left", padx=4)
+        ttk.Button(btns, text="Runter", command=move_down).pack(side="left", padx=4)
+
+        refresh()
+
     def choose_csv(self):
         path = filedialog.askopenfilename(
             title="CSV auswählen",
@@ -773,6 +1064,7 @@ class Wizard(tk.Tk):
         if not path:
             return
         self.meta = {"source_type": "csv", "path": path, "sep": self.csv_sep.get()}
+        self._apply_common_meta_options()
         messagebox.showinfo("CSV gewählt", path)
 
     def choose_sqlite(self):
@@ -800,6 +1092,7 @@ class Wizard(tk.Tk):
             meta["table"] = tabs.iloc[0, 0]
 
         self.meta = meta
+        self._apply_common_meta_options()
         messagebox.showinfo("SQLite gewählt", path)
 
     def choose_regex(self):
@@ -813,6 +1106,7 @@ class Wizard(tk.Tk):
         if not regex:
             return
         self.meta = {"source_type": "regex", "path": path, "regex": regex}
+        self._apply_common_meta_options()
         messagebox.showinfo("Regex-Datei gewählt", path)
 
     # ---------------------------
@@ -824,15 +1118,16 @@ class Wizard(tk.Tk):
             messagebox.showerror("Fehler", "Keine Quelle ausgewählt.")
             return
 
+        self._apply_common_meta_options()
         st = self.meta["source_type"]
         try:
+            working_meta = run_preprocessing_if_needed(self.meta, preview_mode=True)
             if st == "csv":
-                self.meta["sep"] = self.csv_sep.get()
-                df = load_csv_preview(self.meta["path"], self.meta["sep"])
+                df = load_csv_preview(working_meta["path"], working_meta["sep"])
             elif st == "sqlite":
-                df = load_sqlite_preview(self.meta["path"], self.meta.get("query"))
+                df = load_sqlite_preview(working_meta)
             elif st == "regex":
-                df = load_regex_preview(self.meta["path"], self.meta["regex"])
+                df = load_regex_preview(working_meta["path"], working_meta["regex"])
             else:
                 raise ValueError("Unknown source_type")
         except Exception as e:
@@ -900,7 +1195,9 @@ class Wizard(tk.Tk):
             messagebox.showerror("Fehler", "Keine Vorschau geladen.")
             return
         try:
+            self._apply_common_meta_options()
             mapping = self.get_mapping()
+            self._apply_common_meta_options()
             df = parse_full_local(self.meta, mapping, self.plugin_type.get())
             messagebox.showinfo("Parser OK", f"{len(df)} Zeilen normalisiert.")
         except Exception as e:
@@ -912,6 +1209,7 @@ class Wizard(tk.Tk):
             return
         try:
             mapping = self.get_mapping()
+            self._apply_common_meta_options()
             df = parse_full_local(self.meta, mapping, self.plugin_type.get())
         except Exception as e:
             messagebox.showerror("Fehler", str(e))
@@ -940,6 +1238,7 @@ class Wizard(tk.Tk):
             messagebox.showerror("Fehler", "Keine Vorschau geladen.")
             return
         try:
+            self._apply_common_meta_options()
             mapping = self.get_mapping()
         except Exception as e:
             messagebox.showerror("Mapping-Fehler", str(e))
@@ -974,6 +1273,18 @@ class Wizard(tk.Tk):
     # ---------------------------
     # Utility dialog
     # ---------------------------
+
+
+    def show_meta_json(self):
+        if not self.meta:
+            messagebox.showerror("Fehler", "Keine Meta vorhanden.")
+            return
+        self._apply_common_meta_options()
+        win = tk.Toplevel(self)
+        win.title("Aktuelle Meta")
+        box = scrolledtext.ScrolledText(win, width=120, height=40)
+        box.pack(fill="both", expand=True)
+        box.insert("1.0", json.dumps(self.meta, indent=2, ensure_ascii=False))
 
     def _ask_text(self, title, default=""):
         win = tk.Toplevel(self)
