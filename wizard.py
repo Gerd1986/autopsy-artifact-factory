@@ -377,6 +377,26 @@ import subprocess
 import shlex
 import uuid
 
+
+def _bb_text(value):
+    """
+    Preserve Unicode for Autopsy/Jython Blackboard text values and remove
+    U+200E LEFT-TO-RIGHT MARK. No ASCII conversion is performed.
+    """
+    if value is None:
+        return u""
+    try:
+        if isinstance(value, unicode):
+            text = value
+        else:
+            text = unicode(value)
+    except Exception:
+        try:
+            text = unicode(str(value), "utf-8")
+        except Exception:
+            text = unicode(repr(value), "utf-8", "replace")
+    return text.replace(unichr(0x200E), u"")
+
 def _timestamp_to_epoch_and_str(val):
     if val is None:
         return (None, None)
@@ -604,17 +624,17 @@ def parse_rows(meta, mapping, plugin_type):
             rec["event_name"] = row.get(mapping.get("Eventname"))
             rec["remark"] = row.get(mapping.get("Kommentar"))
         elif plugin_type == "Mobile":
-            rec["lastname"] = row.get(mapping.get("Nachname")).encode("ascii", "replace")
-            rec["firstname"] = row.get(mapping.get("Vorname")).encode("ascii", "replace")
+            rec["lastname"] = _bb_text(row.get(mapping.get("Nachname")))
+            rec["firstname"] = _bb_text(row.get(mapping.get("Vorname")))
             rec["phone"] = _normalize_phone(row.get(mapping.get("Telefonnummer")))
             rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Bluetooth":
             rec["devicename"] = row.get(mapping.get("Geraetename"))
             rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Call":
-            rec["caller"] = row.get(mapping.get("Anrufername")).encode("ascii", "replace")
+            rec["caller"] = _bb_text(row.get(mapping.get("Anrufername")))
             rec["caller_mac"] = _normalize_mac(row.get(mapping.get("MACAdresse")))
-            rec["callee"] = row.get(mapping.get("Angerufener")).encode("ascii", "replace")
+            rec["callee"] = _bb_text(row.get(mapping.get("Angerufener")))
             rec["callee_number"] = _normalize_phone(row.get(mapping.get("Nummer")))
             epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
             rec["timestamp_epoch"] = epoch
@@ -680,7 +700,7 @@ def build_artifact_block(plugin_type):
                     longitude = row.get("longitude")
                     attrs = ArrayList()
                     if remark is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, _bb_text(remark)))
                     if timestamp_epoch is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
                     if latitude is not None:
@@ -697,7 +717,7 @@ def build_artifact_block(plugin_type):
                     longitude = row.get("longitude")
                     attrs = ArrayList()
                     if remark is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, _bb_text(remark)))
                     if latitude is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LATITUDE, moduleName, float(latitude)))
                     if longitude is not None:
@@ -714,9 +734,9 @@ def build_artifact_block(plugin_type):
                     if timestamp_epoch is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
                     if event_name is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PROG_NAME, moduleName, str(event_name)))   
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PROG_NAME, moduleName, _bb_text(event_name)))   
                     if remark is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, _bb_text(remark)))
                     art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_RECENT_OBJECT), attrs)
                     blackboard.indexArtifact(art)
 '''
@@ -728,13 +748,13 @@ def build_artifact_block(plugin_type):
                     bt_mac = row.get("bt_mac")
                     attrs = ArrayList()
                     if lastname is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME, moduleName, str(lastname)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME, moduleName, _bb_text(lastname)))
                     if firstname is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(firstname)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, _bb_text(firstname)))
                     if phone is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, str(phone)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, _bb_text(phone)))
                     if bt_mac is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(bt_mac)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, _bb_text(bt_mac)))
                     art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CONTACT), attrs)
                     blackboard.indexArtifact(art)
 '''
@@ -744,9 +764,9 @@ def build_artifact_block(plugin_type):
                     bt_mac = row.get("bt_mac")
                     attrs = ArrayList()
                     if devicename is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DEVICE_NAME, moduleName, str(devicename)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DEVICE_NAME, moduleName, _bb_text(devicename)))
                     if bt_mac is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(bt_mac)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, _bb_text(bt_mac)))
                     art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_BLUETOOTH_PAIRING), attrs)
                     blackboard.indexArtifact(art)
 '''
@@ -762,13 +782,13 @@ def build_artifact_block(plugin_type):
                     if timestamp_epoch is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
                     if caller is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(caller)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, _bb_text(caller)))
                     if caller_mac is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, str(caller_mac)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_MAC_ADDRESS, moduleName, _bb_text(caller_mac)))
                     if callee is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, str(callee)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME_PERSON, moduleName, _bb_text(callee)))
                     if callee_number is not None:
-                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, str(callee_number)))
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PHONE_NUMBER, moduleName, _bb_text(callee_number)))
                     if duration_seconds is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, "Duration (s): %s" % str(duration_seconds)))
                     art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_CALLLOG), attrs)
