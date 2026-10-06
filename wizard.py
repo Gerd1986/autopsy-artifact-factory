@@ -137,6 +137,68 @@ def copy_sqlite_with_sidecars(db_path, target_dir):
             shutil.copy2(sidecar, dst_db + sidecar[len(db_path):])
     return dst_db
 
+
+def _context_patterns(meta):
+    raw = str(meta.get("context_patterns") or "").strip()
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[;,\\n]+", raw) if p.strip()]
+
+def collect_context_files_local(meta, source_path):
+    """
+    Build a preprocessing workspace.
+    single = only selected input (+ SQLite WAL/SHM)
+    folder = all files from the source folder
+    custom = selected input plus glob-style filename patterns
+    """
+    mode = str(meta.get("context_mode") or "single").lower()
+    work_dir = tempfile.mkdtemp(prefix="wizard_context_")
+    source_path = os.path.abspath(source_path)
+    source_dir = os.path.dirname(source_path)
+    source_name = os.path.basename(source_path)
+
+    candidates = [source_path]
+    if mode == "folder":
+        try:
+            candidates = [
+                os.path.join(source_dir, name)
+                for name in os.listdir(source_dir)
+                if os.path.isfile(os.path.join(source_dir, name))
+            ]
+        except Exception:
+            candidates = [source_path]
+    elif mode == "custom":
+        import fnmatch
+        patterns = _context_patterns(meta)
+        try:
+            for name in os.listdir(source_dir):
+                full = os.path.join(source_dir, name)
+                if not os.path.isfile(full):
+                    continue
+                if any(fnmatch.fnmatch(name, pat) for pat in patterns):
+                    candidates.append(full)
+        except Exception:
+            pass
+
+    # SQLite sidecars are useful context even in single mode.
+    if str(meta.get("source_type") or "").lower() == "sqlite":
+        for sidecar in sqlite_sidecar_paths(source_path):
+            if os.path.isfile(sidecar):
+                candidates.append(sidecar)
+
+    copied = {}
+    for src in candidates:
+        if not os.path.isfile(src):
+            continue
+        name = os.path.basename(src)
+        if name in copied:
+            continue
+        dst = os.path.join(work_dir, name)
+        shutil.copy2(src, dst)
+        copied[name] = dst
+
+    return copied.get(source_name, os.path.join(work_dir, source_name)), work_dir, copied
+
 def preprocess_steps_from_meta(meta):
     steps = []
     raw_steps = meta.get("preprocess_steps")
@@ -207,6 +269,10 @@ def run_preprocessing_if_needed(meta, preview_mode=False):
         return new_meta
     current_input = meta["path"]
     script_dir = meta.get("script_dir")
+    context_dir = None
+    context_files = {}
+    if str(meta.get("context_mode") or "single").lower() != "single" or str(meta.get("source_type") or "").lower() == "sqlite":
+        current_input, context_dir, context_files = collect_context_files_local(meta, current_input)
     logs = []
     for idx, step in enumerate(steps):
         output_path = build_preprocess_output_path(current_input, step.get("output_suffix") or ".txt", idx)
@@ -498,6 +564,57 @@ def _copy_sqlite_with_sidecars(db_path, dst_dir):
             shutil.copy2(src, dst_db + suffix)
     return dst_db
 
+
+def _context_patterns(meta):
+    raw = str(meta.get("context_patterns") or "").strip()
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[;,\\n]+", raw) if p.strip()]
+
+def _collect_context_files(meta, source_path):
+    mode = str(meta.get("context_mode") or "single").lower()
+    work_dir = tempfile.mkdtemp(prefix="autopsy_context_")
+    source_path = os.path.abspath(source_path)
+    source_dir = os.path.dirname(source_path)
+    source_name = os.path.basename(source_path)
+    candidates = [source_path]
+
+    if mode == "folder":
+        try:
+            candidates = [os.path.join(source_dir, n) for n in os.listdir(source_dir)
+                          if os.path.isfile(os.path.join(source_dir, n))]
+        except Exception:
+            candidates = [source_path]
+    elif mode == "custom":
+        import fnmatch
+        patterns = _context_patterns(meta)
+        try:
+            for name in os.listdir(source_dir):
+                full = os.path.join(source_dir, name)
+                if os.path.isfile(full) and any([fnmatch.fnmatch(name, p) for p in patterns]):
+                    candidates.append(full)
+        except Exception:
+            pass
+
+    if str(meta.get("source_type") or "").lower() == "sqlite":
+        for suffix in ["-wal", "-shm"]:
+            sidecar = source_path + suffix
+            if os.path.isfile(sidecar):
+                candidates.append(sidecar)
+
+    copied = {}
+    for src in candidates:
+        if not os.path.isfile(src):
+            continue
+        name = os.path.basename(src)
+        if name in copied:
+            continue
+        dst = os.path.join(work_dir, name)
+        shutil.copy2(src, dst)
+        copied[name] = dst
+
+    return (copied.get(source_name, os.path.join(work_dir, source_name)), work_dir, copied)
+
 def _preprocess_steps_from_meta(meta):
     steps = []
     raw_steps = meta.get("preprocess_steps")
@@ -563,6 +680,8 @@ def _run_preprocess_if_needed(meta):
     new_meta = dict(meta)
     current_path = meta["path"]
     script_dir = meta.get("script_dir")
+    if str(meta.get("context_mode") or "single").lower() != "single" or str(meta.get("source_type") or "").lower() == "sqlite":
+        current_path, context_dir, context_files = _collect_context_files(meta, current_path)
     for idx, step in enumerate(steps):
         current_path = _run_preprocess_step(step, current_path, idx, script_dir)
     new_meta["path"] = current_path
@@ -865,6 +984,29 @@ class UniversalPluginModule(DataSourceIngestModule):
                 meta["path"] = outFile
                 meta["script_dir"] = os.path.dirname(__file__).replace("\\\\", "/")
 
+                # Optional preprocessing context: copy sibling evidence files into
+                # the same temp directory so external tools can resolve related files.
+                context_mode = str(meta.get("context_mode") or "single").lower()
+                context_patterns = _context_patterns(meta)
+                if context_mode in ("folder", "custom"):
+                    try:
+                        parent_path = file.getParentPath()
+                        siblings = fm.findFiles(dataSource, "%", parent_path)
+                        if siblings is not None:
+                            for sibling in siblings:
+                                try:
+                                    sibling_name = sibling.getName()
+                                    include = (context_mode == "folder")
+                                    if context_mode == "custom":
+                                        import fnmatch
+                                        include = any([fnmatch.fnmatch(sibling_name, p) for p in context_patterns])
+                                    if include and sibling.getId() != file.getId():
+                                        ContentUtils.writeToFile(sibling, File(os.path.join(tempDir, sibling_name)))
+                                except:
+                                    pass
+                    except:
+                        pass
+
                 if meta.get("source_type") == "sqlite":
                     for suffix in ["-wal", "-shm"]:
                         try:
@@ -911,6 +1053,8 @@ class Wizard(tk.Tk):
         self.preprocess_command = tk.StringVar(value='perl "{script_dir}/getNMEA.pl" "{input}"')
         self.preprocess_output_suffix = tk.StringVar(value=".txt")
         self.preprocess_steps = []
+        self.context_mode = tk.StringVar(value="single")
+        self.context_patterns = tk.StringVar(value="*.db-wal;*.db-shm")
 
         self._build_ui()
 
@@ -961,6 +1105,19 @@ class Wizard(tk.Tk):
         ttk.Button(row2, text="Preprocess-Pipeline bearbeiten", command=self.edit_preprocess_pipeline).pack(side="left")
         ttk.Label(row2, text="Mehrere Steps mit {input}/{output}; script_dir wird im Plugin automatisch gesetzt.").pack(side="left", padx=12)
 
+        context = tk.LabelFrame(self, text="Preprocessing-Kontext")
+        context.pack(fill="x", padx=10, pady=6)
+
+        ctx_row = tk.Frame(context)
+        ctx_row.pack(fill="x", padx=8, pady=5)
+        ttk.Label(ctx_row, text="Kontext:").pack(side="left")
+        ttk.Radiobutton(ctx_row, text="Nur Datei", variable=self.context_mode, value="single").pack(side="left", padx=6)
+        ttk.Radiobutton(ctx_row, text="Ganzer Ordner", variable=self.context_mode, value="folder").pack(side="left", padx=6)
+        ttk.Radiobutton(ctx_row, text="Benutzerdefiniert", variable=self.context_mode, value="custom").pack(side="left", padx=6)
+        ttk.Label(ctx_row, text="Muster:").pack(side="left", padx=(18, 4))
+        ttk.Entry(ctx_row, textvariable=self.context_patterns, width=42).pack(side="left", fill="x", expand=True)
+        ttk.Label(context, text="Muster mit ; trennen, z.B. *.db-wal;*.db-shm;config*.xml. Der Kontext wird in einen gemeinsamen Temp-Ordner kopiert.").pack(anchor="w", padx=8, pady=(0, 5))
+
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
         self.preview_box = scrolledtext.ScrolledText(self, height=18)
         self.preview_box.pack(fill="both", padx=10, pady=6)
@@ -987,6 +1144,8 @@ class Wizard(tk.Tk):
         self.meta["preprocess_command"] = self.preprocess_command.get().strip()
         self.meta["preprocess_output_suffix"] = self.preprocess_output_suffix.get().strip() or ".txt"
         self.meta["preprocess_steps"] = list(self.preprocess_steps)
+        self.meta["context_mode"] = self.context_mode.get()
+        self.meta["context_patterns"] = self.context_patterns.get().strip()
         if self.meta.get("source_type") == "csv":
             self.meta["sep"] = self.csv_sep.get()
 
