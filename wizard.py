@@ -597,18 +597,24 @@ def parse_rows(meta, mapping, plugin_type):
             rec["remark"] = row.get(mapping.get("Kommentar"))
             rec["longitude"] = _normalize_float(row.get(mapping.get("Longitude")), -180, 180)
             rec["latitude"] = _normalize_float(row.get(mapping.get("Latitude")), -90, 90)
+        elif plugin_type == "Event":
+            epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
+            rec["timestamp_epoch"] = epoch
+            rec["timestamp_str"] = ts_str
+            rec["event_name"] = row.get(mapping.get("Eventname"))
+            rec["remark"] = row.get(mapping.get("Kommentar"))
         elif plugin_type == "Mobile":
-            rec["lastname"] = row.get(mapping.get("Nachname"))
-            rec["firstname"] = row.get(mapping.get("Vorname"))
+            rec["lastname"] = row.get(mapping.get("Nachname")).encode("ascii", "replace")
+            rec["firstname"] = row.get(mapping.get("Vorname")).encode("ascii", "replace")
             rec["phone"] = _normalize_phone(row.get(mapping.get("Telefonnummer")))
             rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Bluetooth":
             rec["devicename"] = row.get(mapping.get("Geraetename"))
             rec["bt_mac"] = _normalize_mac(row.get(mapping.get("BluetoothAdresse")))
         elif plugin_type == "Call":
-            rec["caller"] = row.get(mapping.get("Anrufername"))
+            rec["caller"] = row.get(mapping.get("Anrufername")).encode("ascii", "replace")
             rec["caller_mac"] = _normalize_mac(row.get(mapping.get("MACAdresse")))
-            rec["callee"] = row.get(mapping.get("Angerufener"))
+            rec["callee"] = row.get(mapping.get("Angerufener")).encode("ascii", "replace")
             rec["callee_number"] = _normalize_phone(row.get(mapping.get("Nummer")))
             epoch, ts_str = _timestamp_to_epoch_and_str(row.get(mapping.get("Timestamp")))
             rec["timestamp_epoch"] = epoch
@@ -697,6 +703,21 @@ def build_artifact_block(plugin_type):
                     if longitude is not None:
                         attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_GEO_LONGITUDE, moduleName, float(longitude)))
                     art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_GPS_BOOKMARK), attrs)
+                    blackboard.indexArtifact(art)
+'''
+    elif plugin_type == "Event":
+        return r'''
+                    timestamp_epoch = row.get("timestamp_epoch")
+                    event_name = row.get("event_name")
+                    remark = row.get("remark")
+                    attrs = ArrayList()
+                    if timestamp_epoch is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME, moduleName, long(timestamp_epoch)))
+                    if event_name is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PROG_NAME, moduleName, str(event_name)))   
+                    if remark is not None:
+                        attrs.add(BlackboardAttribute(BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT, moduleName, str(remark)))
+                    art = file.newDataArtifact(BlackboardArtifact.Type(BlackboardArtifact.ARTIFACT_TYPE.TSK_RECENT_OBJECT), attrs)
                     blackboard.indexArtifact(art)
 '''
     elif plugin_type == "Mobile":
@@ -880,7 +901,7 @@ class Wizard(tk.Tk):
         ttk.Label(top, text="Plugin-Typ:").pack(side="left")
         ttk.Combobox(
             top, textvariable=self.plugin_type,
-            values=["Geo-Track", "Last-Position", "Geo-Bookmark", "Mobile", "Bluetooth", "Call"],
+            values=["Geo-Track", "Last-Position", "Geo-Bookmark", "Event", "Mobile", "Bluetooth", "Call"],
             state="readonly", width=10
         ).pack(side="left", padx=6)
 
@@ -1153,7 +1174,9 @@ class Wizard(tk.Tk):
         if pt == "Last-Position":
             return ["Kommentar", "Timestamp", "Longitude", "Latitude"]
         if pt == "Geo-Bookmark":
-            return ["Kommentar", "Longitude", "Latitude"]           
+            return ["Kommentar", "Longitude", "Latitude"]
+        if pt == "Event":
+            return ["Timestamp", "Eventname", "Kommentar"]            
         if pt == "Mobile":
             return ["Nachname", "Vorname", "Telefonnummer", "BluetoothAdresse"]
         if pt == "Bluetooth":
