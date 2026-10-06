@@ -911,6 +911,7 @@ class Wizard(tk.Tk):
         self.preprocess_command = tk.StringVar(value='perl "{script_dir}/getNMEA.pl" "{input}"')
         self.preprocess_output_suffix = tk.StringVar(value=".txt")
         self.preprocess_steps = []
+        self.autopsy_input_filename = tk.StringVar(value="")
 
         self._build_ui()
 
@@ -944,6 +945,12 @@ class Wizard(tk.Tk):
 
         ttk.Button(top, text="Vorschau laden", command=self.load_preview).pack(side="left", padx=6)
 
+
+        input_row = tk.Frame(self)
+        input_row.pack(fill="x", padx=10, pady=(2, 4))
+        ttk.Label(input_row, text="Autopsy Input-Dateiname:").pack(side="left")
+        ttk.Entry(input_row, textvariable=self.autopsy_input_filename, width=55).pack(side="left", padx=6)
+        ttk.Label(input_row, text="Unabhängig von der Preview-Datei").pack(side="left", padx=6)
 
         opts = tk.LabelFrame(self, text="Preprocessing")
         opts.pack(fill="x", padx=10, pady=6)
@@ -987,6 +994,7 @@ class Wizard(tk.Tk):
         self.meta["preprocess_command"] = self.preprocess_command.get().strip()
         self.meta["preprocess_output_suffix"] = self.preprocess_output_suffix.get().strip() or ".txt"
         self.meta["preprocess_steps"] = list(self.preprocess_steps)
+        self.meta["autopsy_input_filename"] = self.autopsy_input_filename.get().strip() or os.path.basename(self.meta.get("path", ""))
         if self.meta.get("source_type") == "csv":
             self.meta["sep"] = self.csv_sep.get()
 
@@ -1105,6 +1113,8 @@ class Wizard(tk.Tk):
         if not path:
             return
         self.meta = {"source_type": "csv", "path": path, "sep": self.csv_sep.get()}
+        if not self.autopsy_input_filename.get().strip():
+            self.autopsy_input_filename.set(os.path.basename(path))
         self._apply_common_meta_options()
         messagebox.showinfo("CSV gewählt", path)
 
@@ -1133,6 +1143,8 @@ class Wizard(tk.Tk):
             meta["table"] = tabs.iloc[0, 0]
 
         self.meta = meta
+        if not self.autopsy_input_filename.get().strip():
+            self.autopsy_input_filename.set(os.path.basename(path))
         self._apply_common_meta_options()
         messagebox.showinfo("SQLite gewählt", path)
 
@@ -1147,6 +1159,8 @@ class Wizard(tk.Tk):
         if not regex:
             return
         self.meta = {"source_type": "regex", "path": path, "regex": regex}
+        if not self.autopsy_input_filename.get().strip():
+            self.autopsy_input_filename.set(os.path.basename(path))
         self._apply_common_meta_options()
         messagebox.showinfo("Regex-Datei gewählt", path)
 
@@ -1287,7 +1301,7 @@ class Wizard(tk.Tk):
             messagebox.showerror("Mapping-Fehler", str(e))
             return
 
-        filename = os.path.basename(self.meta["path"])
+        filename = self.autopsy_input_filename.get().strip() or os.path.basename(self.meta["path"])
         code = build_autopsy_template(
             plugin_type=self.plugin_type.get(),
             filename=filename,
