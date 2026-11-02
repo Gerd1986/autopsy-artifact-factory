@@ -171,12 +171,20 @@ def run_single_preprocess_step(command_template, input_path, output_path, shell=
     if script_dir:
         cmd_template = cmd_template.replace("{script_dir}", str(script_dir).replace("\\", "/"))
     command = cmd_template.format(input=input_path, output=output_path)
-    # For local previews, look for relative scripts beside wizard.py.
-    working_dir = script_dir if script_dir and os.path.isdir(script_dir) else os.path.dirname(os.path.abspath(__file__))
-    if shell:
-        pipe = subprocess.Popen(command, shell=True, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Preserve the original local working directory. If a relative script is
+    # absent there, resolve it beside wizard.py or in an explicit script_dir.
+    if not shell:
+        argv = shlex.split(command)
+        if len(argv) > 1 and os.path.splitext(argv[1])[1].lower() in (".py", ".pl", ".exe", ".bat", ".cmd"):
+            script = argv[1]
+            if not os.path.isabs(script) and not os.path.isfile(script):
+                for base in (script_dir, os.path.dirname(os.path.abspath(__file__))):
+                    if base and os.path.isfile(os.path.join(base, script)):
+                        argv[1] = os.path.join(base, script)
+                        break
+        pipe = subprocess.Popen(argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:
-        pipe = subprocess.Popen(shlex.split(command), shell=False, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipe = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_data, stderr_data = pipe.communicate()
     if pipe.returncode != 0:
         if stderr_data is None:
