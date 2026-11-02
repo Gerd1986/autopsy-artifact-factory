@@ -222,27 +222,6 @@ def run_preprocessing_if_needed(meta, preview_mode=False):
 # LOADER (Wizard – mit pandas)
 # ============================================================
 
-def iter_dlt_rows(path, converter="dlt-convert", limit=None):
-    """Decode with COVESA dlt-convert; keep the full decoded record for mapping."""
-    command = [converter, "-a"]
-    if limit is not None:
-        command.extend(["-b", "1", "-e", str(limit)])
-    command.append(path)
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        try:
-            process = subprocess.Popen(command, stdout=output, stderr=errors)
-        except OSError as exc:
-            raise RuntimeError("DLT-Konverter nicht gefunden. dlt-convert installieren oder Pfad auswählen: " + str(exc))
-        process.wait()
-        if process.returncode:
-            errors.seek(0)
-            raise RuntimeError("DLT-Konvertierung fehlgeschlagen: " + errors.read().decode("utf-8", "replace"))
-        output.seek(0)
-        for number, line in enumerate(output, 1):
-            text = line.decode("utf-8", "replace").rstrip()
-            if text:
-                yield {"Message": number, "Text": text}
-
 
 def load_csv_preview(path, sep):
     if sep == "\\t":
@@ -312,8 +291,6 @@ def parse_full_local(meta, mapping, plugin_type):
     elif st == "regex":
         df = load_regex_preview(meta["path"], meta["regex"])
 
-    elif st == "dlt":
-        df = pd.DataFrame(iter_dlt_rows(meta["path"], meta.get("dlt_converter", "dlt-convert")), columns=["Message", "Text"])
 
     else:
         raise ValueError("Unknown source_type")
@@ -631,8 +608,6 @@ def parse_rows(meta, mapping, plugin_type):
         src_iter = _iter_rows_from_csv_file(meta["path"], meta.get("sep", ","))
     elif st == "regex":
         src_iter = _iter_rows_from_regex_file(meta["path"], meta["regex"])
-    elif st == "dlt":
-        src_iter = iter_dlt_rows(meta["path"], meta.get("dlt_converter", "dlt-convert"))
     elif st == "sqlite":
         sql = meta.get("query") or ("SELECT * FROM " + meta.get("table"))
         src_iter = parse_rows_sqlite_jdbc(meta["path"], sql)
@@ -862,7 +837,6 @@ import os
     parts = [header]
     if embed_parser:
         parts.append(EMBEDDED_PARSER_BLOCK)
-        parts.append('def iter_dlt_rows(path, converter="dlt-convert", limit=None):\n    """Decode with COVESA dlt-convert; keep the full decoded record for mapping."""\n    command = [converter, "-a"]\n    if limit is not None:\n        command.extend(["-b", "1", "-e", str(limit)])\n    command.append(path)\n    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:\n        try:\n            process = subprocess.Popen(command, stdout=output, stderr=errors)\n        except OSError as exc:\n            raise RuntimeError("DLT-Konverter nicht gefunden. dlt-convert installieren oder Pfad auswählen: " + str(exc))\n        process.wait()\n        if process.returncode:\n            errors.seek(0)\n            raise RuntimeError("DLT-Konvertierung fehlgeschlagen: " + errors.read().decode("utf-8", "replace"))\n        output.seek(0)\n        for number, line in enumerate(output, 1):\n            text = line.decode("utf-8", "replace").rstrip()\n            if text:\n                yield {"Message": number, "Text": text}\n\n\n')
         parts.append(SQLITE_JDBC_BLOCK)
 
     artifact_block = build_artifact_block(plugin_type)
@@ -957,8 +931,6 @@ class Wizard(tk.Tk):
         self.preprocess_steps = []
         self.preprocess_input_paths = []
         self.input_summary = tk.StringVar(value="Keine separaten Preprocessing-Eingaben")
-        self.dlt_converter = tk.StringVar(value="dlt-convert")
-        self.dlt_viewer = tk.StringVar(value="dlt-viewer")
         self.autopsy_input_filename = tk.StringVar(value="")
         self.module_display_name = tk.StringVar(value="")
 
@@ -995,14 +967,6 @@ class Wizard(tk.Tk):
         ttk.Button(top, text="Vorschau laden", command=self.load_preview).pack(side="left", padx=6)
 
 
-        dlt_row = ttk.Frame(self)
-        dlt_row.pack(fill="x", padx=10, pady=4)
-        ttk.Button(dlt_row, text="DLT-Trace wählen", command=self.choose_dlt).pack(side="left")
-        ttk.Button(dlt_row, text="DLT Viewer öffnen", command=self.open_dlt_viewer).pack(side="left", padx=6)
-        for label, variable in [("DLT-Konverter", self.dlt_converter), ("DLT Viewer", self.dlt_viewer)]:
-            ttk.Label(dlt_row, text=label).pack(side="left", padx=4)
-            ttk.Entry(dlt_row, textvariable=variable, width=20).pack(side="left")
-            ttk.Button(dlt_row, text="…", command=lambda v=variable: self.choose_dlt_tool(v)).pack(side="left")
 
         input_row = tk.Frame(self)
         input_row.pack(fill="x", padx=10, pady=(2, 4))
@@ -1024,7 +988,6 @@ class Wizard(tk.Tk):
         ttk.Button(files_row, text="Preprocessing-Eingaben wählen (alle Dateitypen)", command=self.choose_preprocess_inputs).pack(side="left")
         ttk.Button(files_row, text="Auswahl leeren", command=self.clear_preprocess_inputs).pack(side="left", padx=6)
         ttk.Label(files_row, textvariable=self.input_summary).pack(side="left")
-        ttk.Label(opts, text="Quelle oben bestimmt das Ausgabeformat nach Preprocessing; DLT Viewer öffnet den Original-Trace.").pack(anchor="w", padx=8)
 
         row1 = tk.Frame(opts)
         row1.pack(fill="x", padx=8, pady=5)
@@ -1066,7 +1029,6 @@ class Wizard(tk.Tk):
         self.meta["preprocess_output_suffix"] = self.preprocess_output_suffix.get().strip() or ".txt"
         self.meta["preprocess_steps"] = list(self.preprocess_steps) if self.preprocess_enabled.get() else []
         self.meta["preprocess_input_paths"] = list(self.preprocess_input_paths)
-        self.meta["dlt_converter"] = self.dlt_converter.get().strip() or "dlt-convert"
         self.meta["autopsy_input_filename"] = self.autopsy_input_filename.get().strip() or os.path.basename(self.meta.get("path", ""))
         self.meta["module_display_name"] = self.module_display_name.get().strip()
         if self.meta.get("source_type") == "csv":
@@ -1085,29 +1047,6 @@ class Wizard(tk.Tk):
         self.input_summary.set("Keine separaten Preprocessing-Eingaben")
         self.preview = None
 
-    def choose_dlt_tool(self, variable):
-        path = filedialog.askopenfilename(title="DLT-Programm auswählen", filetypes=[("Alle Dateien", "*.*")])
-        if path:
-            variable.set(path)
-
-    def choose_dlt(self):
-        path = filedialog.askopenfilename(title="DLT-Trace auswählen", filetypes=[("DLT-Traces", "*.dlt"), ("Alle Dateien", "*.*")])
-        if path:
-            self.meta = {"source_type": "dlt", "path": path}
-            self.preview = None
-            self.autopsy_input_filename.set(os.path.basename(path))
-            self._apply_common_meta_options()
-
-    def open_dlt_viewer(self):
-        paths = self.preprocess_input_paths or [self.meta.get("path", "")]
-        path = paths[0]
-        if not path.lower().endswith(".dlt"):
-            messagebox.showerror("DLT Viewer", "Bitte zuerst einen DLT-Trace auswählen.")
-            return
-        try:
-            subprocess.Popen([self.dlt_viewer.get().strip() or "dlt-viewer", path])
-        except OSError as exc:
-            messagebox.showerror("DLT Viewer", "DLT Viewer installieren oder Programmpfad auswählen: " + str(exc))
 
     def edit_preprocess_pipeline(self):
         win = tk.Toplevel(self)
@@ -1310,8 +1249,6 @@ class Wizard(tk.Tk):
             df = load_sqlite_preview(working_meta)
         elif st == "regex":
             df = load_regex_preview(working_meta["path"], working_meta["regex"])
-        elif st == "dlt":
-            df = pd.DataFrame(iter_dlt_rows(working_meta["path"], meta.get("dlt_converter", "dlt-convert"), 50), columns=["Message", "Text"])
         else:
             raise ValueError("Unknown source_type")
         return df
