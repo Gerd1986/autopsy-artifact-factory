@@ -1001,12 +1001,15 @@ class Wizard(tk.Tk):
 
         hint = ttk.LabelFrame(opts, text="Mini-Beispiel (2 Schritte)")
         hint.pack(fill="x", padx=8, pady=(2, 7))
-        ttk.Label(hint, justify="left", anchor="w", text=(
-            '1. python sqlite_statement.py "{input}" "SELECT ..."\\n'
-            '2. perl searchDataHarmanTripsTrails.pl -m --tracks "{input}"\\n'
-            'Der Output von Schritt 1 ist der Input von Schritt 2.\\n'
-            'Die SQL-Abfrage und die Skripte an den eigenen Anwendungsfall anpassen.'
-        )).pack(anchor="w", padx=8, pady=4)
+        for example_line in (
+            '1. python sqlite_statement.py "{input}" "SELECT ..."',
+            '2. perl searchDataHarmanTripsTrails.pl -m --tracks "{input}"',
+            'Der Output von Schritt 1 ist der Input von Schritt 2.',
+            'Die SQL-Abfrage und die Skripte an den eigenen Anwendungsfall anpassen.',
+        ):
+            ttk.Label(hint, text=example_line, anchor="w", justify="left").pack(
+                fill="x", anchor="w", padx=8, pady=1
+            )
 
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
         self.preview_box = scrolledtext.ScrolledText(self, height=18)
