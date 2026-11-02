@@ -909,6 +909,7 @@ class Wizard(tk.Tk):
         self.embed_parser = tk.BooleanVar(value=True)
         self.preprocess_enabled = tk.BooleanVar(value=False)
         self.preprocess_steps = []
+        self.preprocess_result_type = tk.StringVar(value="csv")
         self.preprocess_input_paths = []
         self.input_summary = tk.StringVar(value="Keine separaten Preprocessing-Eingaben")
         self.autopsy_input_filename = tk.StringVar(value="")
@@ -963,6 +964,13 @@ class Wizard(tk.Tk):
         opts = tk.LabelFrame(self, text="Preprocessing")
         opts.pack(fill="x", padx=10, pady=6)
 
+        format_row = ttk.Frame(opts)
+        format_row.pack(fill="x", padx=8, pady=5)
+        ttk.Label(format_row, text="Ausgabeformat nach Preprocessing:").pack(side="left")
+        ttk.Combobox(format_row, textvariable=self.preprocess_result_type,
+                     values=["csv", "sqlite", "regex"], state="readonly", width=12).pack(side="left", padx=6)
+        ttk.Label(format_row, text="CSV-Trennzeichen oben; für SQLite/Regex ggf. Quelle konfigurieren").pack(side="left", padx=6)
+
         files_row = ttk.Frame(opts)
         files_row.pack(fill="x", padx=8, pady=5)
         ttk.Button(files_row, text="Preprocessing-Eingaben wählen (alle Dateitypen)", command=self.choose_preprocess_inputs).pack(side="left")
@@ -1011,8 +1019,13 @@ class Wizard(tk.Tk):
 
 
     def _apply_common_meta_options(self):
+        if not self.meta and self.preprocess_input_paths:
+            self.meta = {"source_type": self.preprocess_result_type.get(),
+                         "path": self.preprocess_input_paths[0], "sep": self.csv_sep.get()}
         if not self.meta:
             return
+        if self.preprocess_input_paths and self.preprocess_enabled.get():
+            self.meta["source_type"] = self.preprocess_result_type.get()
         self.meta["preprocess_enabled"] = bool(self.preprocess_enabled.get())
         self.meta["preprocess_steps"] = list(self.preprocess_steps) if self.preprocess_enabled.get() else []
         self.meta["preprocess_input_paths"] = list(self.preprocess_input_paths)
@@ -1026,6 +1039,12 @@ class Wizard(tk.Tk):
         if paths:
             self.preprocess_input_paths = list(paths)
             self.preprocess_enabled.set(True)
+            if not self.meta:
+                self.meta = {"source_type": self.preprocess_result_type.get(),
+                             "path": paths[0], "sep": self.csv_sep.get()}
+            if not self.autopsy_input_filename.get().strip():
+                self.autopsy_input_filename.set(os.path.basename(paths[0]))
+            self._apply_common_meta_options()
             self.input_summary.set("; ".join(os.path.basename(path) for path in paths))
             self.preview = None
 
@@ -1182,8 +1201,8 @@ class Wizard(tk.Tk):
     # ---------------------------
 
     def load_preview(self):
-        if not self.meta:
-            messagebox.showerror("Fehler", "Keine Quelle ausgewählt.")
+        if not self.meta and not self.preprocess_input_paths:
+            messagebox.showerror("Fehler", "Keine Quelle oder Preprocessing-Eingabe ausgewählt.")
             return
 
         self._apply_common_meta_options()
