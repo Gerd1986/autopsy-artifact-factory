@@ -999,6 +999,16 @@ class Wizard(tk.Tk):
             ttk.Button(step_buttons, text=caption, command=action).pack(fill="x", pady=2)
         self.refresh_preprocess_steps()
 
+        hint = ttk.LabelFrame(opts, text="Mini-Beispiel (2 Schritte)")
+        hint.pack(fill="x", padx=8, pady=(2, 7))
+        ttk.Label(hint, justify="left", text=(
+            'Input: trails.sqlite  |  Ausgabeformat: CSV  |  Trennzeichen: \\t\\n'
+            '1. python "{script_dir}/sqlite_statement.py" "{input}" "{output}"  →  .csv\\n'
+            '2. perl "{script_dir}/trails_parser.pl" "{input}" "{output}"  →  .csv\\n'
+            'Jeder Schritt liest {input} und schreibt {output}; der nächste Schritt liest diesen Output.\\n'
+            'Die Beispielskripte sind Platzhalter – eigene Skripte verwenden.'
+        )).pack(anchor="w", padx=8, pady=4)
+
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
         self.preview_box = scrolledtext.ScrolledText(self, height=18)
         self.preview_box.pack(fill="both", padx=10, pady=6)
