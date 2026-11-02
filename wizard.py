@@ -171,10 +171,12 @@ def run_single_preprocess_step(command_template, input_path, output_path, shell=
     if script_dir:
         cmd_template = cmd_template.replace("{script_dir}", str(script_dir).replace("\\", "/"))
     command = cmd_template.format(input=input_path, output=output_path)
+    # For local previews, look for relative scripts beside wizard.py.
+    working_dir = script_dir if script_dir and os.path.isdir(script_dir) else os.path.dirname(os.path.abspath(__file__))
     if shell:
-        pipe = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipe = subprocess.Popen(command, shell=True, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:
-        pipe = subprocess.Popen(shlex.split(command), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipe = subprocess.Popen(shlex.split(command), shell=False, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_data, stderr_data = pipe.communicate()
     if pipe.returncode != 0:
         if stderr_data is None:
@@ -532,10 +534,14 @@ def _run_preprocess_step(step, input_path, step_index, script_dir):
     if script_dir:
         cmd_template = cmd_template.replace("{script_dir}", str(script_dir).replace("\\", "/"))
     cmd = cmd_template.format(input=input_path, output=out_path)
+    # Resolve relative script names against the generated Autopsy plugin directory.
+    # This supports e.g. "python sqlite_statement.py ..." and "perl parser.pl ..."
+    # without depending on Autopsy's process working directory.
+    working_dir = script_dir if script_dir and os.path.isdir(script_dir) else None
     if step.get("shell", False):
-        pipe = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipe = subprocess.Popen(cmd, shell=True, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:
-        pipe = subprocess.Popen(shlex.split(cmd), shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pipe = subprocess.Popen(shlex.split(cmd), shell=False, cwd=working_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_data, stderr_data = pipe.communicate()
     if pipe.returncode != 0:
         if stderr_data is None:
