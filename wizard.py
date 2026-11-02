@@ -1002,11 +1002,10 @@ class Wizard(tk.Tk):
         hint = ttk.LabelFrame(opts, text="Mini-Beispiel (2 Schritte)")
         hint.pack(fill="x", padx=8, pady=(2, 7))
         ttk.Label(hint, justify="left", text=(
-            'Input: trails.sqlite, Ausgabeformat: CSV\\n'
-            '1. python {script_dir}/sqlite_statement.py {input} {output}\\n'
-            '2. perl {script_dir}/trails_parser.pl {input} {output}\\n'
-            'Jeder Schritt liest {input} und schreibt {output}. Der nächste Schritt liest diesen Output.\\n'
-            'Die Beispielskripte sind Platzhalter – eigene Skripte verwenden.'
+            '1. python sqlite_statement.py "{input}" "SELECT ..."\\n'
+            '2. perl searchDataHarmanTripsTrails.pl -m --tracks "{input}"\\n'
+            'Der Output von Schritt 1 ist der Input von Schritt 2.\\n'
+            'Die SQL-Abfrage und die Skripte an den eigenen Anwendungsfall anpassen.'
         )).pack(anchor="w", padx=8, pady=4)
 
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
