@@ -153,15 +153,6 @@ def preprocess_steps_from_meta(meta):
                 "output_suffix": str(step.get("output_suffix") or "").strip() or ".txt",
                 "shell": bool(step.get("shell", False)),
             })
-    elif meta.get("preprocess_enabled"):
-        cmd = str(meta.get("preprocess_command") or "").strip()
-        if cmd:
-            steps.append({
-                "name": "step_1",
-                "command": cmd,
-                "output_suffix": str(meta.get("preprocess_output_suffix") or "").strip() or ".txt",
-                "shell": False,
-            })
     return steps
 
 def build_preprocess_output_path(current_input, preferred_suffix=None, step_index=None):
@@ -530,15 +521,6 @@ def _preprocess_steps_from_meta(meta):
                 "command": cmd,
                 "output_suffix": str(step.get("output_suffix") or "").strip() or ".txt",
                 "shell": bool(step.get("shell", False)),
-            })
-    elif meta.get("preprocess_enabled"):
-        cmd = str(meta.get("preprocess_command") or "").strip()
-        if cmd:
-            steps.append({
-                "name": "step_1",
-                "command": cmd,
-                "output_suffix": str(meta.get("preprocess_output_suffix") or "").strip() or ".txt",
-                "shell": False,
             })
     return steps
 
@@ -926,8 +908,6 @@ class Wizard(tk.Tk):
         self.csv_sep = tk.StringVar(value=",")
         self.embed_parser = tk.BooleanVar(value=True)
         self.preprocess_enabled = tk.BooleanVar(value=False)
-        self.preprocess_command = tk.StringVar(value='perl "{script_dir}/getNMEA.pl" "{input}"')
-        self.preprocess_output_suffix = tk.StringVar(value=".txt")
         self.preprocess_steps = []
         self.preprocess_input_paths = []
         self.input_summary = tk.StringVar(value="Keine separaten Preprocessing-Eingaben")
@@ -989,18 +969,27 @@ class Wizard(tk.Tk):
         ttk.Button(files_row, text="Auswahl leeren", command=self.clear_preprocess_inputs).pack(side="left", padx=6)
         ttk.Label(files_row, textvariable=self.input_summary).pack(side="left")
 
-        row1 = tk.Frame(opts)
+        row1 = ttk.Frame(opts)
         row1.pack(fill="x", padx=8, pady=5)
-        ttk.Checkbutton(row1, text="Preprocessing aktiv", variable=self.preprocess_enabled).pack(side="left")
-        ttk.Label(row1, text="Legacy Step 1:").pack(side="left", padx=(12, 4))
-        ttk.Entry(row1, textvariable=self.preprocess_command, width=72).pack(side="left", fill="x", expand=True)
-        ttk.Label(row1, text="Suffix:").pack(side="left", padx=(10, 4))
-        ttk.Entry(row1, textvariable=self.preprocess_output_suffix, width=10).pack(side="left", padx=(0, 6))
+        ttk.Checkbutton(row1, text="Multistep-Preprocessing aktiv", variable=self.preprocess_enabled).pack(side="left")
+        ttk.Label(row1, text="Jeder Step: {input} → {output}").pack(side="left", padx=12)
 
-        row2 = tk.Frame(opts)
-        row2.pack(fill="x", padx=8, pady=5)
-        ttk.Button(row2, text="Preprocess-Pipeline bearbeiten", command=self.edit_preprocess_pipeline).pack(side="left")
-        ttk.Label(row2, text="Mehrere Steps mit {input}/{output}; script_dir wird im Plugin automatisch gesetzt.").pack(side="left", padx=12)
+        steps_area = ttk.Frame(opts)
+        steps_area.pack(fill="x", padx=8, pady=5)
+        self.preprocess_listbox = tk.Listbox(steps_area, height=5, exportselection=False)
+        self.preprocess_listbox.pack(side="left", fill="both", expand=True)
+        steps_scroll = ttk.Scrollbar(steps_area, orient="vertical", command=self.preprocess_listbox.yview)
+        steps_scroll.pack(side="left", fill="y")
+        self.preprocess_listbox.configure(yscrollcommand=steps_scroll.set)
+        step_buttons = ttk.Frame(steps_area)
+        step_buttons.pack(side="left", padx=8)
+        for caption, action in [("Hinzufügen", self.add_preprocess_step),
+                                ("Bearbeiten", self.edit_preprocess_step),
+                                ("Löschen", self.delete_preprocess_step),
+                                ("Hoch", self.move_preprocess_step_up),
+                                ("Runter", self.move_preprocess_step_down)]:
+            ttk.Button(step_buttons, text=caption, command=action).pack(fill="x", pady=2)
+        self.refresh_preprocess_steps()
 
         ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
         self.preview_box = scrolledtext.ScrolledText(self, height=18)
@@ -1025,8 +1014,6 @@ class Wizard(tk.Tk):
         if not self.meta:
             return
         self.meta["preprocess_enabled"] = bool(self.preprocess_enabled.get())
-        self.meta["preprocess_command"] = self.preprocess_command.get().strip()
-        self.meta["preprocess_output_suffix"] = self.preprocess_output_suffix.get().strip() or ".txt"
         self.meta["preprocess_steps"] = list(self.preprocess_steps) if self.preprocess_enabled.get() else []
         self.meta["preprocess_input_paths"] = list(self.preprocess_input_paths)
         self.meta["autopsy_input_filename"] = self.autopsy_input_filename.get().strip() or os.path.basename(self.meta.get("path", ""))
@@ -1048,112 +1035,88 @@ class Wizard(tk.Tk):
         self.preview = None
 
 
-    def edit_preprocess_pipeline(self):
-        win = tk.Toplevel(self)
-        win.title("Preprocess-Pipeline")
-        win.geometry("1100x520")
+    def refresh_preprocess_steps(self):
+        self.preprocess_listbox.delete(0, "end")
+        for idx, step in enumerate(self.preprocess_steps):
+            shell_txt = "shell" if step.get("shell", False) else "noshell"
+            self.preprocess_listbox.insert("end", "%d. %s [%s] -> %s :: %s" %
+                (idx + 1, step.get("name", "step"), shell_txt,
+                 step.get("output_suffix", ""), step.get("command", "")))
 
-        ttk.Label(win, text="Jeder Step nutzt {input} und {output}. Reihenfolge = Ausführungsreihenfolge.").pack(anchor="w", padx=10, pady=6)
-        listbox = tk.Listbox(win, height=10)
-        listbox.pack(fill="x", padx=10, pady=6)
-
-        def refresh():
-            listbox.delete(0, "end")
-            for idx, step in enumerate(self.preprocess_steps):
-                shell_txt = "shell" if step.get("shell", False) else "noshell"
-                listbox.insert("end", "%d. %s [%s] -> %s :: %s" % (idx + 1, step.get("name", "step"), shell_txt, step.get("output_suffix", ""), step.get("command", "")))
-            self.preprocess_enabled.set(bool(self.preprocess_steps or self.preprocess_command.get().strip()))
-
-        def edit_step(existing=None):
-            dlg = tk.Toplevel(win)
-            dlg.title("Preprocess-Step")
-            dlg.geometry("950x340")
-
-            name_var = tk.StringVar(value=(existing or {}).get("name", "step_%d" % (len(self.preprocess_steps) + 1)))
-            suffix_var = tk.StringVar(value=(existing or {}).get("output_suffix", ".txt"))
-            shell_var = tk.BooleanVar(value=(existing or {}).get("shell", False))
-
-            ttk.Label(dlg, text="Name:").pack(anchor="w", padx=10, pady=(10, 2))
-            ttk.Entry(dlg, textvariable=name_var, width=40).pack(anchor="w", padx=10)
-
-            row = tk.Frame(dlg)
-            row.pack(fill="x", padx=10, pady=8)
-            ttk.Label(row, text="Output-Suffix:").pack(side="left")
-            ttk.Entry(row, textvariable=suffix_var, width=12).pack(side="left", padx=6)
-            ttk.Checkbutton(row, text="shell=True", variable=shell_var).pack(side="left", padx=16)
-
-            ttk.Label(dlg, text="Command:").pack(anchor="w", padx=10, pady=(8, 2))
-            cmd_box = scrolledtext.ScrolledText(dlg, height=10, wrap="word")
-            cmd_box.pack(fill="both", expand=True, padx=10, pady=4)
-            cmd_box.insert("1.0", (existing or {}).get("command", ""))
-
-            result = []
-            def ok():
-                result.append({
-                    "name": name_var.get().strip() or ("step_%d" % (len(self.preprocess_steps) + 1)),
-                    "command": cmd_box.get("1.0", "end-1c").strip(),
-                    "output_suffix": suffix_var.get().strip() or ".txt",
-                    "shell": bool(shell_var.get()),
-                })
-                dlg.destroy()
-
-            ttk.Button(dlg, text="OK", command=ok).pack(pady=8)
-            dlg.grab_set()
-            dlg.wait_window()
-            return result[0] if result else None
-
-        btns = tk.Frame(win)
-        btns.pack(fill="x", padx=10, pady=4)
-
-        def add_step():
-            step = edit_step()
-            if step and step.get("command"):
-                self.preprocess_steps.append(step)
-                refresh()
-
-        def edit_selected():
-            sel = listbox.curselection()
-            if not sel:
+    def _preprocess_step_dialog(self, existing=None):
+        dlg = tk.Toplevel(self)
+        dlg.title("Preprocess-Step")
+        dlg.geometry("950x340")
+        name_var = tk.StringVar(value=(existing or {}).get("name", "step_%d" % (len(self.preprocess_steps) + 1)))
+        suffix_var = tk.StringVar(value=(existing or {}).get("output_suffix", ".txt"))
+        shell_var = tk.BooleanVar(value=(existing or {}).get("shell", False))
+        ttk.Label(dlg, text="Name:").pack(anchor="w", padx=10, pady=(10, 2))
+        ttk.Entry(dlg, textvariable=name_var, width=40).pack(anchor="w", padx=10)
+        row = ttk.Frame(dlg)
+        row.pack(fill="x", padx=10, pady=8)
+        ttk.Label(row, text="Output-Suffix:").pack(side="left")
+        ttk.Entry(row, textvariable=suffix_var, width=12).pack(side="left", padx=6)
+        ttk.Checkbutton(row, text="shell=True", variable=shell_var).pack(side="left", padx=16)
+        ttk.Label(dlg, text="Command:").pack(anchor="w", padx=10, pady=(8, 2))
+        cmd_box = scrolledtext.ScrolledText(dlg, height=10, wrap="word")
+        cmd_box.pack(fill="both", expand=True, padx=10, pady=4)
+        cmd_box.insert("1.0", (existing or {}).get("command", ""))
+        result = []
+        def ok():
+            command = cmd_box.get("1.0", "end-1c").strip()
+            if not command:
+                messagebox.showerror("Preprocessing", "Bitte einen Befehl eingeben.", parent=dlg)
                 return
-            idx = sel[0]
-            step = edit_step(self.preprocess_steps[idx])
-            if step and step.get("command"):
-                self.preprocess_steps[idx] = step
-                refresh()
-                listbox.selection_set(idx)
+            result.append({"name": name_var.get().strip() or ("step_%d" % (len(self.preprocess_steps) + 1)),
+                           "command": command, "output_suffix": suffix_var.get().strip() or ".txt",
+                           "shell": bool(shell_var.get())})
+            dlg.destroy()
+        ttk.Button(dlg, text="OK", command=ok).pack(pady=8)
+        dlg.grab_set()
+        dlg.wait_window()
+        return result[0] if result else None
 
-        def delete_selected():
-            sel = listbox.curselection()
-            if not sel:
-                return
+    def add_preprocess_step(self):
+        step = self._preprocess_step_dialog()
+        if step:
+            self.preprocess_steps.append(step)
+            self.preprocess_enabled.set(True)
+            self.refresh_preprocess_steps()
+
+    def edit_preprocess_step(self):
+        sel = self.preprocess_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        step = self._preprocess_step_dialog(self.preprocess_steps[idx])
+        if step:
+            self.preprocess_steps[idx] = step
+            self.refresh_preprocess_steps()
+            self.preprocess_listbox.selection_set(idx)
+
+    def delete_preprocess_step(self):
+        sel = self.preprocess_listbox.curselection()
+        if sel:
             del self.preprocess_steps[sel[0]]
-            refresh()
+            self.refresh_preprocess_steps()
+            if not self.preprocess_steps:
+                self.preprocess_enabled.set(False)
 
-        def move_up():
-            sel = listbox.curselection()
-            if not sel or sel[0] == 0:
-                return
+    def move_preprocess_step_up(self):
+        sel = self.preprocess_listbox.curselection()
+        if sel and sel[0] > 0:
             idx = sel[0]
-            self.preprocess_steps[idx - 1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx - 1]
-            refresh()
-            listbox.selection_set(idx - 1)
+            self.preprocess_steps[idx-1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx-1]
+            self.refresh_preprocess_steps()
+            self.preprocess_listbox.selection_set(idx-1)
 
-        def move_down():
-            sel = listbox.curselection()
-            if not sel or sel[0] >= len(self.preprocess_steps) - 1:
-                return
+    def move_preprocess_step_down(self):
+        sel = self.preprocess_listbox.curselection()
+        if sel and sel[0] < len(self.preprocess_steps)-1:
             idx = sel[0]
-            self.preprocess_steps[idx + 1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx + 1]
-            refresh()
-            listbox.selection_set(idx + 1)
-
-        ttk.Button(btns, text="Hinzufügen", command=add_step).pack(side="left", padx=4)
-        ttk.Button(btns, text="Bearbeiten", command=edit_selected).pack(side="left", padx=4)
-        ttk.Button(btns, text="Löschen", command=delete_selected).pack(side="left", padx=4)
-        ttk.Button(btns, text="Hoch", command=move_up).pack(side="left", padx=4)
-        ttk.Button(btns, text="Runter", command=move_down).pack(side="left", padx=4)
-
-        refresh()
+            self.preprocess_steps[idx+1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx+1]
+            self.refresh_preprocess_steps()
+            self.preprocess_listbox.selection_set(idx+1)
 
     def choose_csv(self):
         path = filedialog.askopenfilename(
