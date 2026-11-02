@@ -1001,7 +1001,7 @@ class Wizard(tk.Tk):
 
         hint = ttk.LabelFrame(opts, text="Mini-Beispiel (2 Schritte)")
         hint.pack(fill="x", padx=8, pady=(2, 7))
-        ttk.Label(hint, justify="left", text=(
+        ttk.Label(hint, justify="left", anchor="w", text=(
             '1. python sqlite_statement.py "{input}" "SELECT ..."\\n'
             '2. perl searchDataHarmanTripsTrails.pl -m --tracks "{input}"\\n'
             'Der Output von Schritt 1 ist der Input von Schritt 2.\\n'
