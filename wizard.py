@@ -998,7 +998,7 @@ class Wizard(tk.Tk):
 
         steps_area = ttk.Frame(opts)
         steps_area.pack(fill="x", padx=8, pady=5)
-        self.preprocess_listbox = tk.Listbox(steps_area, height=5, exportselection=False)
+        self.preprocess_listbox = tk.Listbox(steps_area, height=3, exportselection=False)
         self.preprocess_listbox.pack(side="left", fill="both", expand=True)
         steps_scroll = ttk.Scrollbar(steps_area, orient="vertical", command=self.preprocess_listbox.yview)
         steps_scroll.pack(side="left", fill="y")
@@ -1025,19 +1025,19 @@ class Wizard(tk.Tk):
                 fill="x", anchor="w", padx=8, pady=1
             )
 
-        ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
-        self.preview_box = scrolledtext.ScrolledText(self, height=18)
-        self.preview_box.pack(fill="both", padx=10, pady=6)
-
-        self.mapping_frame = tk.LabelFrame(self, text="Spalten-Mapping (jede Spalte einzeln auswählen)")
-        self.mapping_frame.pack(fill="x", padx=10, pady=8)
-
+        # Keep mapping and actions visible even when preprocessing takes space.
         bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=10, pady=10)
-
+        bottom.pack(side="bottom", fill="x", padx=10, pady=6)
         ttk.Button(bottom, text="Parser testen (lokal)", command=self.test_parser).pack(side="left", padx=6)
         ttk.Button(bottom, text="Normalisierte CSV speichern", command=self.export_parsed_csv).pack(side="left", padx=6)
         ttk.Button(bottom, text="Autopsy-Template speichern", command=self.save_template).pack(side="left", padx=6)
+
+        self.mapping_frame = tk.LabelFrame(self, text="Spalten-Mapping (jede Spalte einzeln auswählen)")
+        self.mapping_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(self, text="Vorschau (erste ~50 Zeilen):").pack(anchor="w", padx=10)
+        self.preview_box = scrolledtext.ScrolledText(self, height=9)
+        self.preview_box.pack(fill="both", expand=True, padx=10, pady=4)
 
     # ---------------------------
     # Source selection
