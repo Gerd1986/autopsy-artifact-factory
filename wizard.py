@@ -182,6 +182,11 @@ def run_single_preprocess_step(command_template, input_path, output_path, shell=
                     if base and os.path.isfile(os.path.join(base, script)):
                         argv[1] = os.path.join(base, script)
                         break
+        if argv and not os.path.isabs(argv[0]) and not os.path.isfile(argv[0]) and os.path.splitext(argv[0])[1].lower() in (".exe", ".bat", ".cmd"):
+            for base in (script_dir, os.path.dirname(os.path.abspath(__file__))):
+                if base and os.path.isfile(os.path.join(base, argv[0])):
+                    argv[0] = os.path.join(base, argv[0])
+                    break
         pipe = subprocess.Popen(argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:
         pipe = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -207,7 +212,9 @@ def run_preprocessing_if_needed(meta, preview_mode=False):
     if not steps:
         return new_meta
     current_input = meta["path"]
-    script_dir = meta.get("script_dir")
+    # Keep the original input directory for every pipeline step, including
+    # steps whose immediate input is a temporary intermediate file.
+    script_dir = meta.get("script_dir") or os.path.dirname(os.path.abspath(current_input))
     logs = []
     for idx, step in enumerate(steps):
         output_path = build_preprocess_output_path(current_input, step.get("output_suffix") or ".txt", idx)
