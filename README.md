@@ -75,12 +75,12 @@ Originaldatei
    -> CSV-Vorschau / Mapping / Autopsy-Parser
 ```
 
-### 3. Schritte verwalten und aktivieren
+### 3. Schritte verwalten
 
 - **Bearbeiten:** markierten Schritt ändern.
 - **Löschen:** markierten Schritt entfernen.
 - **Hoch / Runter:** Ausführungsreihenfolge ändern.
-- **Multistep-Preprocessing aktiv:** Pipeline ein- oder ausschalten. Beim Hinzufügen eines Schritts wird sie automatisch aktiviert; beim Löschen des letzten Schritts deaktiviert.
+- **Automatische Ausführung:** Sobald mindestens ein Schritt vorhanden ist, läuft die Pipeline automatisch. Ohne Schritte werden die ausgewählten Dateien direkt eingelesen. Eine Aktivierungs-Checkbox gibt es nicht mehr.
 
 Nach Änderungen **Vorschau laden** erneut anklicken, damit die aktuelle Pipeline ausgeführt und das Mapping auf Basis der erzeugten Daten angezeigt wird.
 
