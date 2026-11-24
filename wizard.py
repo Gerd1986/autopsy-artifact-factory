@@ -268,7 +268,7 @@ def load_regex_preview(path, pattern):
 # ============================================================
 
 def parse_full_local(meta, mapping, plugin_type):
-    paths = meta.get("preprocess_input_paths", []) if meta.get("preprocess_enabled") else []
+    paths = meta.get("preprocess_input_paths", [])
     if paths:
         result = []
         for path in paths:
@@ -928,7 +928,6 @@ class Wizard(tk.Tk):
         self.plugin_type = tk.StringVar(value="Geo-Track")
         self.csv_sep = tk.StringVar(value=",")
         self.embed_parser = tk.BooleanVar(value=True)
-        self.preprocess_enabled = tk.BooleanVar(value=False)
         self.preprocess_steps = []
         self.preprocess_result_type = tk.StringVar(value="csv")
         self.preprocess_input_paths = []
@@ -1000,7 +999,7 @@ class Wizard(tk.Tk):
 
         row1 = ttk.Frame(opts)
         row1.pack(fill="x", padx=8, pady=5)
-        ttk.Checkbutton(row1, text="Multistep-Preprocessing aktiv", variable=self.preprocess_enabled).pack(side="left")
+        ttk.Label(row1, text="Preprocessing läuft automatisch, sobald Schritte vorhanden sind.").pack(side="left")
         ttk.Label(row1, text="Jeder Step: {input} → {output}").pack(side="left", padx=12)
 
         steps_area = ttk.Frame(opts)
@@ -1057,10 +1056,9 @@ class Wizard(tk.Tk):
                          "path": self.preprocess_input_paths[0], "sep": self.csv_sep.get()}
         if not self.meta:
             return
-        if self.preprocess_input_paths and self.preprocess_enabled.get():
+        if self.preprocess_input_paths:
             self.meta["source_type"] = self.preprocess_result_type.get()
-        self.meta["preprocess_enabled"] = bool(self.preprocess_enabled.get())
-        self.meta["preprocess_steps"] = list(self.preprocess_steps) if self.preprocess_enabled.get() else []
+        self.meta["preprocess_steps"] = list(self.preprocess_steps)
         self.meta["preprocess_input_paths"] = list(self.preprocess_input_paths)
         self.meta["autopsy_input_filename"] = self.autopsy_input_filename.get().strip() or os.path.basename(self.meta.get("path", ""))
         self.meta["module_display_name"] = self.module_display_name.get().strip()
@@ -1071,7 +1069,6 @@ class Wizard(tk.Tk):
         paths = filedialog.askopenfilenames(title="Preprocessing-Eingaben auswählen", filetypes=[("Alle Dateien", "*.*")])
         if paths:
             self.preprocess_input_paths = list(paths)
-            self.preprocess_enabled.set(True)
             if not self.meta:
                 self.meta = {"source_type": self.preprocess_result_type.get(),
                              "path": paths[0], "sep": self.csv_sep.get()}
@@ -1132,7 +1129,7 @@ class Wizard(tk.Tk):
         step = self._preprocess_step_dialog()
         if step:
             self.preprocess_steps.append(step)
-            self.preprocess_enabled.set(True)
+            self.preview = None
             self.refresh_preprocess_steps()
 
     def edit_preprocess_step(self):
@@ -1143,6 +1140,7 @@ class Wizard(tk.Tk):
         step = self._preprocess_step_dialog(self.preprocess_steps[idx])
         if step:
             self.preprocess_steps[idx] = step
+            self.preview = None
             self.refresh_preprocess_steps()
             self.preprocess_listbox.selection_set(idx)
 
@@ -1150,15 +1148,15 @@ class Wizard(tk.Tk):
         sel = self.preprocess_listbox.curselection()
         if sel:
             del self.preprocess_steps[sel[0]]
+            self.preview = None
             self.refresh_preprocess_steps()
-            if not self.preprocess_steps:
-                self.preprocess_enabled.set(False)
 
     def move_preprocess_step_up(self):
         sel = self.preprocess_listbox.curselection()
         if sel and sel[0] > 0:
             idx = sel[0]
             self.preprocess_steps[idx-1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx-1]
+            self.preview = None
             self.refresh_preprocess_steps()
             self.preprocess_listbox.selection_set(idx-1)
 
@@ -1167,6 +1165,7 @@ class Wizard(tk.Tk):
         if sel and sel[0] < len(self.preprocess_steps)-1:
             idx = sel[0]
             self.preprocess_steps[idx+1], self.preprocess_steps[idx] = self.preprocess_steps[idx], self.preprocess_steps[idx+1]
+            self.preview = None
             self.refresh_preprocess_steps()
             self.preprocess_listbox.selection_set(idx+1)
 
@@ -1241,7 +1240,7 @@ class Wizard(tk.Tk):
         self._apply_common_meta_options()
         st = self.meta["source_type"]
         try:
-            paths = self.preprocess_input_paths if self.preprocess_enabled.get() else []
+            paths = self.preprocess_input_paths
             frames = [self._load_source_preview(dict(self.meta, path=path)) for path in (paths or [self.meta["path"]])]
             df = pd.concat(frames, ignore_index=True).head(50)
         except Exception as e:
